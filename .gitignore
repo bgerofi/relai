@@ -1,0 +1,13 @@
+# Virtual environment (not committed; recreate with ./setup.sh)
+.venv/
+uv.lock
+
+# Python
+__pycache__/
+*.py[cod]
+*.egg-info/
+build/
+dist/
+
+# Local config / secrets
+.env
