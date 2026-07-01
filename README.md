@@ -37,3 +37,41 @@ relai -- ssh user@host
 ```
 
 Exit by exiting the spawned program (e.g. `exit` in the shell).
+
+### In-session commands
+
+Press the prefix key (default **Ctrl-G**), then a command letter:
+
+- `Ctrl-G` `s` — open the scrollback viewer
+- `Ctrl-G` `Ctrl-G` — send a literal prefix byte to the program underneath
+
+Change the prefix with `--prefix` (e.g. `relai --prefix ctrl-o`).
+
+## LLM configuration
+
+relai selects an LLM provider entirely from environment variables. Set the
+three variables for one provider:
+
+| Provider  | URL                 | Key                 | Model             |
+|-----------|---------------------|---------------------|-------------------|
+| OpenAI    | `OPENAI_API_URL`    | `OPENAI_API_KEY`    | `OPENAI_MODEL`    |
+| Anthropic | `ANTHROPIC_API_URL` | `ANTHROPIC_API_KEY` | `ANTHROPIC_MODEL` |
+| Google    | `GOOGLE_API_URL`    | `GOOGLE_API_KEY`    | `GOOGLE_MODEL`    |
+| Custom    | `CUSTOM_API_URL`    | `CUSTOM_API_KEY`    | `CUSTOM_MODEL`    |
+
+The **custom** provider speaks the OpenAI-compatible API, so it works with local
+servers (LM Studio, llama.cpp, vLLM, Ollama's OpenAI shim) and gateways. Google
+uses the Gemini (`google-genai`) SDK. If more than one provider is fully
+configured, the precedence is custom > google > anthropic > openai.
+
+At startup relai makes a minimal request to verify the provider is reachable. If
+no provider is configured, relai runs as a plain relay. Use `--no-llm` to skip
+LLM setup entirely.
+
+```bash
+# Example: OpenAI
+export OPENAI_API_URL=https://api.openai.com/v1
+export OPENAI_API_KEY=sk-...
+export OPENAI_MODEL=gpt-4o
+relai
+```

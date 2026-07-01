@@ -6,6 +6,7 @@ import argparse
 import os
 import sys
 
+from .llm import LLMClient, LLMError, LLMNotConfigured, create_client
 from .relai import DEFAULT_PREFIX, Relai
 
 
@@ -49,6 +50,11 @@ def main(argv: list[str] | None = None) -> int:
         help="Prefix key for relai commands, e.g. 'C-g' (default), 'ctrl-o', '^b'.",
     )
     parser.add_argument(
+        "--no-llm",
+        action="store_true",
+        help="Run as a plain relay without any LLM (skip provider setup/check).",
+    )
+    parser.add_argument(
         "command",
         nargs=argparse.REMAINDER,
         help="Command (and args) to run. Prefix with '--' to pass flags through.",
@@ -62,10 +68,43 @@ def main(argv: list[str] | None = None) -> int:
     if not command:
         command = [_default_shell()]
 
+    llm = None if args.no_llm else _setup_llm()
+
     try:
-        return Relai(command, prefix=args.prefix).run()
+        return Relai(command, prefix=args.prefix, llm=llm).run()
     except KeyboardInterrupt:
         return 130
+
+
+def _setup_llm() -> LLMClient | None:
+    """Resolve and verify an LLM provider from the environment.
+
+    Returns a ready client, or ``None`` if no provider is configured. Exits the
+    process if a provider *is* configured but the connectivity check fails, so
+    the user is not surprised later by a dead backend.
+    """
+    try:
+        client = create_client()
+    except LLMNotConfigured:
+        sys.stderr.write(
+            "relai: no LLM provider configured (set {OPENAI,ANTHROPIC,GOOGLE,"
+            "CUSTOM}_API_URL/_API_KEY/_MODEL). Running as a plain relay.\n"
+        )
+        return None
+
+    sys.stderr.write(
+        f"relai: verifying {client.name} model {client.model!r}... "
+    )
+    sys.stderr.flush()
+    try:
+        client.verify()
+    except LLMError as exc:
+        sys.stderr.write("FAILED\n")
+        sys.stderr.write(f"relai: LLM check failed: {exc}\n")
+        sys.stderr.write("relai: fix the configuration or pass --no-llm.\n")
+        sys.exit(2)
+    sys.stderr.write("ok\n")
+    return client
 
 
 if __name__ == "__main__":

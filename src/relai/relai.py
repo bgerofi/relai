@@ -21,12 +21,15 @@ import struct
 import sys
 import termios
 import tty
-from typing import Sequence
+from typing import TYPE_CHECKING, Sequence
 
 import pyte
 
 from .overlay import ScrollbackViewer
 from .screen import RelaiScreen
+
+if TYPE_CHECKING:
+    from .llm import LLMClient
 
 # relai commands are entered with a prefix key (like screen/tmux) followed by a
 # command letter. A single-byte control character is used as the prefix so no
@@ -74,14 +77,23 @@ class Relai:
     prefix:
         The single-byte prefix key that introduces a relai command. Defaults to
         Ctrl-G. Pressing it twice sends a literal prefix byte to the child.
+    llm:
+        An optional, already-verified LLM client. When ``None``, relai runs as a
+        plain relay with AI features disabled.
     """
 
     #: How many bytes to read from a fd at a time.
     READ_SIZE = 65536
 
-    def __init__(self, command: Sequence[str], prefix: bytes = DEFAULT_PREFIX) -> None:
+    def __init__(
+        self,
+        command: Sequence[str],
+        prefix: bytes = DEFAULT_PREFIX,
+        llm: "LLMClient | None" = None,
+    ) -> None:
         self.command = list(command)
         self.prefix = prefix
+        self.llm = llm
         self._child_pid: int = -1
         self._master_fd: int = -1
         self._stdin_fd = sys.stdin.fileno()
