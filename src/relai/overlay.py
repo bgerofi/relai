@@ -29,6 +29,19 @@ def _write_all(fd: int, data: bytes) -> None:
         data = data[n:]
 
 
+def _move_to(row: int, col: int) -> bytes:
+    """Return a CSI sequence to move the cursor to (1-based) row, col."""
+    return f"\x1b[{row};{col}H".encode("ascii")
+
+
+def _wrap(text: str, width: int) -> list[str]:
+    """Hard-wrap ``text`` to ``width`` columns, preserving empty lines."""
+    width = max(1, width)
+    if not text:
+        return [""]
+    return [text[i : i + width] for i in range(0, len(text), width)]
+
+
 class ScrollbackViewer:
     """A simple pager that displays lines on the alternate screen buffer.
 
@@ -47,11 +60,17 @@ class ScrollbackViewer:
         self.rows = rows
         self.cols = cols
 
-    def show(self, lines: list[str], title: str = "relai scrollback") -> None:
+    def show(
+        self,
+        lines: list[str],
+        title: str = "relai scrollback",
+        start_at_top: bool = False,
+    ) -> None:
         """Open the pager on ``lines`` and block until the user closes it."""
         body_rows = max(1, self.rows - 1)  # reserve one row for the status bar
-        # Start scrolled to the bottom (most recent), like a fresh pager view.
-        top = max(0, len(lines) - body_rows)
+        # Scrollback starts at the bottom (most recent); other content (e.g. an
+        # AI reply) reads more naturally from the top.
+        top = 0 if start_at_top else max(0, len(lines) - body_rows)
 
         _write_all(self.out_fd, _ENTER_ALT + _HIDE_CURSOR)
         try:
@@ -122,6 +141,102 @@ class ScrollbackViewer:
         # Single-byte keys.
         b = chunk[:1]
         return _SINGLE_KEYS.get(b, "other")
+
+
+class AIPanel:
+    """Prompt the user for a question, run it through the LLM, show the reply.
+
+    The whole interaction happens on the alternate screen buffer so the child
+    program's screen is restored untouched afterward. The caller supplies an
+    ``ask`` callback that takes the typed question and returns the reply text;
+    the panel stays open (on the alternate screen) while that call runs so the
+    "Thinking..." indicator is visible.
+    """
+
+    def __init__(self, out_fd: int, in_fd: int, rows: int, cols: int) -> None:
+        self.out_fd = out_fd
+        self.in_fd = in_fd
+        self.rows = rows
+        self.cols = cols
+
+    def run(self, ask, footer: str = "") -> None:
+        """Read a question, call ``ask(question)``, and display the reply.
+
+        ``ask`` is ``Callable[[str], str]``. If the user submits an empty
+        question or cancels with Esc, nothing is sent.
+        """
+        _write_all(self.out_fd, _ENTER_ALT + _SHOW_CURSOR)
+        try:
+            question = self._read_question(footer)
+            if not question:
+                return
+            self._render_status("Thinking...")
+            try:
+                reply = ask(question)
+            except Exception as exc:  # surfaced to the user, not crashing relai
+                reply = f"[relai] LLM request failed:\n{exc}"
+            self._show_reply(question, reply)
+        finally:
+            _write_all(self.out_fd, _SHOW_CURSOR + _LEAVE_ALT)
+
+    # -- question input ------------------------------------------------------
+
+    def _read_question(self, footer: str) -> str:
+        """Read a single line of input with basic editing. Esc cancels."""
+        prompt = "Ask relai: "
+        buf = bytearray()
+        self._render_prompt(prompt, buf, footer)
+        while True:
+            chunk = os.read(self.in_fd, 64)
+            if not chunk:
+                return ""
+            if chunk == b"\x1b":  # bare Esc cancels
+                return ""
+            if chunk in (b"\r", b"\n"):  # Enter submits
+                return buf.decode("utf-8", "replace").strip()
+            if chunk == b"\x03":  # Ctrl-C cancels
+                return ""
+            if chunk in (b"\x7f", b"\x08"):  # Backspace / Delete
+                if buf:
+                    # Drop one UTF-8 character (handle trailing continuation bytes).
+                    del buf[-1]
+                    while buf and (buf[-1] & 0xC0) == 0x80:
+                        del buf[-1]
+                self._render_prompt(prompt, buf, footer)
+                continue
+            # Ignore other escape/control sequences; append printable input.
+            if chunk[:1] == b"\x1b" or (len(chunk) == 1 and chunk[0] < 0x20):
+                continue
+            buf += chunk
+            self._render_prompt(prompt, buf, footer)
+
+    def _render_prompt(self, prompt: str, buf: bytearray, footer: str) -> None:
+        text = prompt + buf.decode("utf-8", "replace")
+        out = bytearray(_CLEAR)
+        out += text[: self.cols].encode("utf-8", "replace")
+        # Footer/help on the last row.
+        help_line = footer or "Enter to send · Esc to cancel"
+        out += _move_to(self.rows, 1)
+        out += _INVERSE
+        out += help_line[: self.cols].ljust(self.cols).encode("utf-8", "replace")
+        out += _RESET_SGR
+        # Put the cursor back at the end of the typed text.
+        out += _move_to(1, min(len(text), self.cols) + 1)
+        _write_all(self.out_fd, bytes(out))
+
+    def _render_status(self, message: str) -> None:
+        out = bytearray(_CLEAR + _HIDE_CURSOR)
+        out += message[: self.cols].encode("utf-8", "replace")
+        _write_all(self.out_fd, bytes(out))
+
+    # -- reply display -------------------------------------------------------
+
+    def _show_reply(self, question: str, reply: str) -> None:
+        lines: list[str] = [f"Q: {question}", ""]
+        for para in reply.splitlines() or [""]:
+            lines.extend(_wrap(para, self.cols))
+        viewer = ScrollbackViewer(self.out_fd, self.in_fd, self.rows, self.cols)
+        viewer.show(lines, title="relai answer", start_at_top=True)
 
 
 # Single-byte keys accepted by the viewer.

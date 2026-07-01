@@ -14,18 +14,21 @@ import errno
 import fcntl
 import os
 import pty
+import re
 import select
 import shutil
 import signal
 import struct
 import sys
 import termios
+import time
 import tty
 from typing import TYPE_CHECKING, Sequence
 
 import pyte
 
-from .overlay import ScrollbackViewer
+from .overlay import AIPanel, ScrollbackViewer
+from .inline import InlineChat
 from .screen import RelaiScreen
 
 if TYPE_CHECKING:
@@ -44,7 +47,8 @@ DEFAULT_PREFIX = b"\x07"  # Ctrl-G
 def _get_winsize(fd: int) -> tuple[int, int]:
     """Return (rows, cols) for the terminal on ``fd``.
 
-    Falls back to a sane default if the size cannot be queried.
+    Falls back to a sane default if the size cannot be queried or is reported as
+    zero (e.g. an unsized PTY), so callers never receive a 0 dimension.
     """
     try:
         packed = fcntl.ioctl(fd, termios.TIOCGWINSZ, b"\x00" * 8)
@@ -54,7 +58,9 @@ def _get_winsize(fd: int) -> tuple[int, int]:
     except OSError:
         pass
     size = shutil.get_terminal_size(fallback=(80, 24))
-    return size.lines, size.columns
+    rows = size.lines if size.lines > 0 else 24
+    cols = size.columns if size.columns > 0 else 80
+    return rows, cols
 
 
 def _set_winsize(fd: int, rows: int, cols: int) -> None:
@@ -281,6 +287,8 @@ class Relai:
             self._write_all(self._master_fd, self.prefix)
         elif byte in (b"s", b"S"):
             self._open_scrollback_viewer()
+        elif byte in (b"a", b"A"):
+            self._open_ai_panel()
         # Unknown command letters are ignored (not forwarded), matching the
         # screen/tmux convention of swallowing unrecognized prefix commands.
 
@@ -290,6 +298,117 @@ class Relai:
         lines = self.screen.full_text(include_scrollback=True)
         viewer = ScrollbackViewer(self._stdout_fd, self._stdin_fd, rows, cols)
         viewer.show(lines)
+
+    def _open_ai_panel(self) -> None:
+        """Open the AI chat.
+
+        In line-oriented mode the exchange is injected inline into the scroll
+        flow. While a full-screen (alternate-buffer) app is active there is no
+        scroll flow to inject into, so the temporary overlay panel is used
+        instead.
+        """
+        if self.screen.in_alt_screen:
+            self._open_ai_overlay()
+        else:
+            self._open_ai_inline()
+
+    def _ai_ask_callback(self):
+        """Return the ``ask`` callable and a short provider label."""
+        if self.llm is None:
+            def ask(_question: str) -> str:
+                return (
+                    "No LLM provider is configured. Set the "
+                    "{OPENAI,ANTHROPIC,GOOGLE,CUSTOM}_API_URL/_API_KEY/_MODEL "
+                    "environment variables and restart relai."
+                )
+
+            return ask, "no LLM"
+        return self._ask_llm, f"{self.llm.name}:{self.llm.model}"
+
+    def _open_ai_inline(self) -> None:
+        """Inject an AI question/answer exchange inline, above the prompt."""
+        _rows, cols = _get_winsize(self._stdout_fd)
+        # Ask the real terminal where the cursor actually is. This is immune to
+        # any drift between relai's screen model and the physical screen (e.g.
+        # relai's own startup banner, which the model never saw).
+        pos = self._query_cursor()
+        if pos is not None:
+            prompt_row, cursor_col = pos[0], pos[1] - 1  # -> 1-based row, 0-based col
+        else:
+            prompt_row = self.screen.cursor.y + 1
+            cursor_col = self.screen.cursor.x
+
+        ask, provider = self._ai_ask_callback()
+        chat = InlineChat(self._stdout_fd, self._stdin_fd, cols)
+        chat.run(prompt_row, cursor_col, ask, provider)
+
+    def _query_cursor(self, timeout: float = 0.5):
+        """Return the physical cursor as ``(row, col)`` (1-based) via DSR.
+
+        Sends a Device Status Report request (``ESC[6n``) and parses the
+        terminal's ``ESC[<row>;<col>R`` reply. Any bytes the user typed while we
+        waited are re-processed as normal input. Returns ``None`` on timeout.
+        """
+        self._write_all(self._stdout_fd, b"\x1b[6n")
+        buf = b""
+        deadline = time.time() + timeout
+        while True:
+            remaining = deadline - time.time()
+            if remaining <= 0:
+                break
+            r, _, _ = select.select([self._stdin_fd], [], [], remaining)
+            if not r:
+                break
+            try:
+                chunk = os.read(self._stdin_fd, 64)
+            except OSError:
+                break
+            if not chunk:
+                break
+            buf += chunk
+            if b"R" in buf:
+                break
+
+        match = re.search(rb"\x1b\[(\d+);(\d+)R", buf)
+        if match is None:
+            if buf:
+                self._handle_input(buf)  # not a DSR reply: treat as user input
+            return None
+        # Forward any stray bytes around the report as normal input.
+        leftover = buf[: match.start()] + buf[match.end():]
+        if leftover:
+            self._handle_input(leftover)
+        return int(match.group(1)), int(match.group(2))
+
+    def _open_ai_overlay(self) -> None:
+        """Prompt for a question in the overlay panel and show the reply."""
+        rows, cols = _get_winsize(self._stdout_fd)
+        panel = AIPanel(self._stdout_fd, self._stdin_fd, rows, cols)
+        ask, provider = self._ai_ask_callback()
+        if self.llm is None:
+            panel.run(ask, footer="relai · no LLM · press Enter")
+            return
+        footer = f"relai · {provider} · Enter to send · Esc to cancel"
+        panel.run(ask, footer=footer)
+
+    def _ask_llm(self, question: str) -> str:
+        """Send the current screen plus the user's question to the LLM."""
+        screen_text = self.snapshot_text()
+        messages = [
+            {
+                "role": "system",
+                "content": (
+                    "You are relai, an assistant embedded in a terminal. The user "
+                    "is looking at the terminal screen shown below. Answer their "
+                    "question about it concisely and helpfully.\n\n"
+                    "--- BEGIN TERMINAL SCREEN ---\n"
+                    f"{screen_text}\n"
+                    "--- END TERMINAL SCREEN ---"
+                ),
+            },
+            {"role": "user", "content": question},
+        ]
+        return self.llm.complete(messages)
 
     def _read(self, fd: int) -> bytes | None:
         """Read from ``fd``. Return ``None`` on EOF/child-gone, else bytes."""
