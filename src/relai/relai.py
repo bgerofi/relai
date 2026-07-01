@@ -25,6 +25,18 @@ from typing import Sequence
 
 import pyte
 
+from .overlay import ScrollbackViewer
+from .screen import RelaiScreen
+
+# relai commands are entered with a prefix key (like screen/tmux) followed by a
+# command letter. A single-byte control character is used as the prefix so no
+# terminal emulator remaps it and it survives SSH and nested screen/tmux.
+#
+# Default prefix: Ctrl-G (0x07). Commands:
+#   <prefix> s          open the scrollback viewer
+#   <prefix> <prefix>   send a literal prefix byte to the child
+DEFAULT_PREFIX = b"\x07"  # Ctrl-G
+
 
 def _get_winsize(fd: int) -> tuple[int, int]:
     """Return (rows, cols) for the terminal on ``fd``.
@@ -59,23 +71,31 @@ class Relai:
     command:
         The argv of the command to spawn (e.g. ``["bash"]`` or
         ``["ssh", "host"]``).
+    prefix:
+        The single-byte prefix key that introduces a relai command. Defaults to
+        Ctrl-G. Pressing it twice sends a literal prefix byte to the child.
     """
 
     #: How many bytes to read from a fd at a time.
     READ_SIZE = 65536
 
-    def __init__(self, command: Sequence[str]) -> None:
+    def __init__(self, command: Sequence[str], prefix: bytes = DEFAULT_PREFIX) -> None:
         self.command = list(command)
+        self.prefix = prefix
         self._child_pid: int = -1
         self._master_fd: int = -1
         self._stdin_fd = sys.stdin.fileno()
         self._stdout_fd = sys.stdout.fileno()
         self._old_term_attrs: list | None = None
         self._resized = False
+        # True after the prefix key was pressed, while waiting for the command
+        # letter (the next byte selects the relai command).
+        self._awaiting_command = False
 
         rows, cols = _get_winsize(self._stdout_fd)
-        # pyte keeps a live model of what the child has drawn on screen.
-        self.screen = pyte.Screen(cols, rows)
+        # pyte keeps a live model of what the child has drawn on screen, plus a
+        # scrollback of normal-buffer output that scrolled off the top.
+        self.screen = RelaiScreen(cols, rows)
         self.stream = pyte.ByteStream(self.screen)
 
     # -- lifecycle -----------------------------------------------------------
@@ -124,19 +144,38 @@ class Relai:
                 lines.pop()
         return "\n".join(lines)
 
-    def snapshot(self) -> dict:
+    def scrollback_text(self) -> str:
+        """Return logical output that scrolled off the top (oldest first).
+
+        This is normal-buffer scrollback only; output produced by full-screen
+        alternate-buffer apps (vim/htop/less) is intentionally excluded.
+        """
+        return "\n".join(self.screen.scrollback_lines())
+
+    def snapshot(self, include_scrollback: bool = False) -> dict:
         """Return a structured snapshot of the current screen state.
 
-        Includes the plain-text view, the terminal size, and the cursor
-        position -- enough context for an agent to reason about the screen and
-        decide where input would go.
+        Includes the plain-text view, the terminal size, the cursor position,
+        and whether a full-screen (alternate-buffer) app is active -- enough
+        context for an agent to reason about the screen and decide where input
+        would go.
+
+        Parameters
+        ----------
+        include_scrollback:
+            If true, also include the normal-buffer scrollback text under the
+            ``"scrollback"`` key.
         """
-        return {
+        snap = {
             "rows": self.screen.lines,
             "cols": self.screen.columns,
             "cursor": {"row": self.screen.cursor.y, "col": self.screen.cursor.x},
+            "alt_screen": self.screen.in_alt_screen,
             "text": self.snapshot_text(),
         }
+        if include_scrollback:
+            snap["scrollback"] = self.scrollback_text()
+        return snap
 
     # -- terminal setup ------------------------------------------------------
 
@@ -198,10 +237,47 @@ class Relai:
             if stdin in readable:
                 data = self._read(stdin)
                 if data:
-                    # Human input goes straight to the child.
-                    self._write_all(master, data)
+                    self._handle_input(data)
 
         return self._reap_child()
+
+    # -- input handling / prefix commands -----------------------------------
+
+    def _handle_input(self, data: bytes) -> None:
+        """Forward human input to the child, intercepting relai prefix commands.
+
+        Input is processed one byte at a time so the prefix key and its
+        following command letter are recognized even when they arrive in the
+        same read or split across reads. The prefix key itself is never
+        forwarded unless pressed twice (``<prefix> <prefix>`` sends a literal).
+        """
+        for i in range(len(data)):
+            byte = data[i : i + 1]
+            if self._awaiting_command:
+                self._awaiting_command = False
+                self._run_prefix_command(byte)
+            elif byte == self.prefix:
+                # Enter command mode; the next byte selects the command.
+                self._awaiting_command = True
+            else:
+                self._write_all(self._master_fd, byte)
+
+    def _run_prefix_command(self, byte: bytes) -> None:
+        """Handle the command byte following the prefix key."""
+        if byte == self.prefix:
+            # Doubled prefix -> send a literal prefix byte to the child.
+            self._write_all(self._master_fd, self.prefix)
+        elif byte in (b"s", b"S"):
+            self._open_scrollback_viewer()
+        # Unknown command letters are ignored (not forwarded), matching the
+        # screen/tmux convention of swallowing unrecognized prefix commands.
+
+    def _open_scrollback_viewer(self) -> None:
+        """Pause passthrough and show the scrollback overlay."""
+        rows, cols = _get_winsize(self._stdout_fd)
+        lines = self.screen.full_text(include_scrollback=True)
+        viewer = ScrollbackViewer(self._stdout_fd, self._stdin_fd, rows, cols)
+        viewer.show(lines)
 
     def _read(self, fd: int) -> bytes | None:
         """Read from ``fd``. Return ``None`` on EOF/child-gone, else bytes."""
