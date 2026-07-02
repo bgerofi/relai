@@ -61,6 +61,88 @@ _PASTE_OFF = b"\x1b[?2004l"
 _PASTE_START = b"\x1b[200~"
 _PASTE_END = b"\x1b[201~"
 
+# Appended verbatim to the LLM system prompt on every invocation. Documents the
+# self-generated, persistent helper tooling the agent can maintain on the remote
+# machine to work around the harness only being able to see the terminal.
+RELAI_HELPERS_DOC = """\
+## relai helpers (self-generated tools on the remote machine)
+
+The harness only sees the terminal; it has no direct file/exec access to the
+remote box. To work around this, relai maintains small, dependency-free helper
+tools under ~/.relai/bin/ on the remote machine. These persist across sessions.
+
+### First step every session (cheap): detect them
+Run:  ls -la ~/.relai/bin/ 2>/dev/null && ~/.relai/bin/relai_helper info 2>/dev/null
+If `relai_helper` exists, prefer it for file read/edit/search (see spec below).
+If it's missing and a task would benefit, offer to (re)create it, or do so when
+the user says "initialize your helpers".
+
+### "initialize your helpers" ritual
+  1. Detect what exists (ls ~/.relai/bin, and `relai_helper info`).
+  2. Confirm desired capabilities (default set: read, write, append, replace,
+     search, run).
+  3. (Re)generate helper(s) into ~/.relai/bin/, chmod +x, then VALIDATE:
+     python3 -c "import ast; ast.parse(open(PATH).read())" and a smoke test.
+     Build large files by appending in chunks via QUOTED heredocs with
+     inject_input escape-interpretation DISABLED (so \\n, backslashes, quotes
+     arrive verbatim); verify with `wc -l` after each chunk.
+  4. Report what was created and how to call it.
+### relai_helper — precise interface (v0.1.0, stdlib Python 3 only)
+Path: ~/.relai/bin/relai_helper   (executable)
+Design: every CONTENT payload is base64 (immune to quoting/newline/escape
+corruption); every result is sentinel-framed with an exit code, so output is
+parsed deterministically, NOT inferred from screen text.
+
+Output frame (always):
+    <<<RELAI:BEGIN op=NAME>>>
+    <base64 payload, present only when there is output>
+    <<<RELAI:END op=NAME exit=CODE  key=val ...>>>
+To read a payload: take the line(s) between BEGIN and END and `base64 -d`.
+Trust the `exit=` field for success/failure.
+
+Subcommands:
+  read PATH [--start N] [--end M]
+      Payload = base64 of file (or 1-indexed inclusive line range).
+      Meta: path=, lines=<total>, range=A-B.
+  write PATH --b64 DATA
+      Overwrite PATH with base64-decoded DATA (creates parent dirs).
+      Meta: path=, bytes=.
+  append PATH --b64 DATA
+      Append base64-decoded DATA to PATH. Meta: path=, bytes=.
+  replace PATH --old-b64 A --new-b64 B [--count N]
+      Literal (non-regex) string replace of A->B in PATH. Replaces all
+      occurrences unless --count limits it.
+      exit=2 with meta error=old_not_found if A is absent (file unchanged).
+      Meta on success: path=, replaced=<count>.
+  search PATTERN [--path P] [--glob G]
+      Recursive Python-regex search. P defaults to "." (a file or dir).
+      --glob filters filenames (e.g. "*.py"). Skips .git, node_modules,
+      __pycache__. Payload = base64 of newline-joined "file:line:text" hits.
+      exit=0 if any match, exit=1 if none. Meta: matches=.
+  run --b64 CMD
+      Run base64-decoded CMD via the shell; payload = base64 of combined
+      stdout + (stderr appended after a "[stderr]" marker). `exit=` is the
+      command's real exit status. NOTE: for a pipeline/;-list this is the
+      status of the LAST command, same as normal shell semantics.
+  info
+      Payload = base64 of "relai_helper <ver>\\ncaps=...\\npython=...".
+      Use this (or `relai_helper <subcmd> -h`) to re-derive the interface in a
+      fresh session if this spec is ever unavailable.
+### Usage conventions
+  - Pass content/commands as base64:  --b64 "$(printf %s "$TEXT" | base64 -w0)"
+    (use `base64 -w0` to avoid line wrapping).
+  - Prefer relai_helper over raw shell for reading, editing, and searching
+    files -- it eliminates quoting/escape corruption and gives a reliable exit
+    code. Plain shell is fine when it's genuinely simpler.
+  - Parse results from the RELAI:BEGIN/END frame and base64-decode the payload;
+    rely on `exit=` rather than reading success from screen text.
+  - Keep helpers under ~/.relai/ (outside the user's repos) so they never show
+    up in git status.
+  - The helper is a convenience, not a requirement. If it's missing, offer to
+    recreate it, but don't block work on it.
+  - When self-recovering the interface, run `~/.relai/bin/relai_helper info`
+    and `~/.relai/bin/relai_helper <subcmd> -h`."""
+
 
 def _get_winsize(fd: int) -> tuple[int, int]:
     """Return (rows, cols) for the terminal on ``fd``.
@@ -782,7 +864,8 @@ class Relai:
             "that a better solution requires leaving or exiting that application "
             "(for example quitting the current program to run something else), do "
             "NOT exit on your own -- first explain the better approach and confirm "
-            "with the user, and only exit the application once they agree."
+            "with the user, and only exit the application once they agree.\n\n"
+            + RELAI_HELPERS_DOC
         )
 
     def _llm_tools(self) -> list[ToolSpec]:
