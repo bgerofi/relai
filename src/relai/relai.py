@@ -143,6 +143,20 @@ Subcommands:
   - When self-recovering the interface, run `~/.relai/bin/relai_helper info`
     and `~/.relai/bin/relai_helper <subcmd> -h`."""
 
+# Auto-sent to the agent the first time the panel opens over a shell-like
+# screen, so it can bootstrap its helper tooling without the user asking.
+HELPERS_INIT_PROMPT = (
+    "This is the first time the relai panel has opened this session and the "
+    "foreground application looks like a shell. Following the '## relai helpers' "
+    "section of your instructions, quietly check whether ~/.relai/bin/relai_helper "
+    "already exists and works (run the cheap detection step). If it is present and "
+    "functional, just confirm that in one short line. If it is missing or broken, "
+    "initialize your helpers now: create ~/.relai/bin/relai_helper, chmod +x, "
+    "validate it (ast.parse + a smoke test), and report briefly what you created "
+    "and how to call it. Keep the whole exchange concise. If the foreground turns "
+    "out not to be an interactive shell after all, do nothing and say nothing."
+)
+
 
 def _get_winsize(fd: int) -> tuple[int, int]:
     """Return (rows, cols) for the terminal on ``fd``.
@@ -236,6 +250,9 @@ class Relai:
         self._panel: AiPanel | None = None
         self._panel_closing = False
         self._panel_messages: list[tuple[str, str]] = []
+        # Set once we have auto-asked the agent to initialize its helpers (only
+        # attempted the first time the panel opens over a shell-like screen).
+        self._helpers_init_attempted = False
         # Bracketed-paste accumulator for the panel input (paste bursts may span
         # several stdin reads and can embed newlines).
         self._panel_pasting = False
@@ -489,16 +506,46 @@ class Relai:
         self._panel_pasting = False
         self._panel_pastebuf = bytearray()
 
+        # Decide whether the foreground looks like a shell BEFORE the resize
+        # reflows the model, so the prompt line is read in its original form.
+        looks_shell = self._looks_like_shell()
+
         self._apply_split_size()
         self._compositor = Compositor(rows, cols)
         self._write_all(
             self._stdout_fd, b"\x1b[?25h" + _PASTE_ON + self._compositor.clear()
         )
         self._render_split()
+        self._maybe_init_helpers(looks_shell)
         try:
             self._split_loop()
         finally:
             self._leave_split()
+
+    def _looks_like_shell(self) -> bool:
+        """Heuristic: does the cursor sit at a shell prompt right now?
+
+        Uses the learned prompt prefix (the cursor line up to the cursor). A
+        trailing ``$``/``#``/``%`` is a strong shell signal; ``>`` is excluded
+        on purpose so REPLs (``>>>``) don't trigger helper initialization.
+        """
+        try:
+            prefix = self._current_prompt_prefix().rstrip()
+        except Exception:
+            return False
+        return bool(prefix) and prefix[-1] in "$#%"
+
+    def _maybe_init_helpers(self, looks_shell: bool) -> None:
+        """On the first shell-like panel open, ask the agent to init helpers."""
+        if self._helpers_init_attempted:
+            return
+        if self.llm is None or not looks_shell:
+            return
+        self._helpers_init_attempted = True
+        self._start_ask(
+            HELPERS_INIT_PROMPT,
+            info="Shell detected \u2014 checking/initializing relai helpers\u2026",
+        )
 
     def _apply_split_size(self) -> None:
         """Resize the model and child PTY to the region above the panel."""
@@ -761,7 +808,24 @@ class Relai:
         question = panel.take_input()
         if not question:
             return
-        panel.add_user(question)
+        self._start_ask(question, user_echo=question)
+
+    def _start_ask(
+        self, question: str, *, user_echo: str | None = None, info: str | None = None
+    ) -> None:
+        """Kick off an agent turn on a background thread.
+
+        ``user_echo`` is shown as the user's line in the transcript (typed
+        questions); ``info`` shows a dim status note (auto-initiated turns). The
+        ``question`` is what the model actually receives.
+        """
+        panel = self._panel
+        if panel is None or panel.thinking:
+            return
+        if info:
+            panel.add_info(info)
+        if user_echo:
+            panel.add_user(user_echo)
         panel.thinking = True
         panel.activity = "Thinking"
         panel.tick = 0
