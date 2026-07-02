@@ -207,6 +207,10 @@ class Relai:
     #: Absolute cap (seconds) on how long to wait for injected input to settle.
     SETTLE_MAX_WAIT = 120.0
 
+    #: Output token budget for the agent's replies. The provider default (1024)
+    #: truncates longer answers mid-sentence, so the panel asks for more room.
+    REPLY_MAX_TOKENS = 8192
+
     def __init__(
         self,
         command: Sequence[str],
@@ -820,7 +824,11 @@ class Relai:
         self._llm_history.append({"role": "user", "content": user_content})
         try:
             while True:
-                turn = self.llm.converse([system, *self._llm_history], tools=tools)
+                turn = self.llm.converse(
+                    [system, *self._llm_history],
+                    tools=tools,
+                    max_tokens=self.REPLY_MAX_TOKENS,
+                )
                 self._llm_history.append(turn.assistant_message)
                 if not turn.tool_calls:
                     return turn.text
