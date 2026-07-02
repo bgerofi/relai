@@ -15,11 +15,11 @@ travels with you across `ssh` hops and nested `tmux`/`screen` sessions — the
 agent keeps working on the far side without any agent or API key installed on
 the remote host. Your session, wherever it goes, carries the agent along.
 
-The human is in control by default. relai just relays — until you summon the
+The human is in control by default. relai just relays, until you summon the
 agent. Once you do, it can:
 
 - **Run commands** on your behalf (and read back their output).
-- **Control interactive applications** by sending real keystrokes — edit in
+- **Control interactive applications** by sending real keystrokes, edit in
   `vim`, page through `less`, drive a Python REPL, and so on.
 - **Focus on specific parts of the screen, including scrollback history**, so it
   can reason about exactly what you are looking at, not just the last line.
