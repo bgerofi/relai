@@ -1,23 +1,35 @@
 # relai
 
-**relai** is a PTY-level relay for your terminal. It spawns a command (your shell
-by default), sits transparently on the character stream between you and that
-program, and — eventually — lets you pull an AI agent into the loop on demand.
+**relai** is an AI agent that lives in your terminal. It spawns a command (your
+shell by default) and sits transparently on the character stream between you and
+that program, so the agent is always one keystroke away — no matter what you are
+running.
 
-The human is in control by default. relai just relays.
+Because relai operates at the pseudo-terminal (PTY) layer rather than inside any
+particular application, it integrates **seamlessly with any terminal and any
+program**: plain shells, full-screen ncurses apps (`htop`, `vim`, `less`), and
+REPLs all work unchanged. There is nothing to configure per-app; if it runs in a
+terminal, relai can drive it.
 
-Because it operates at the pseudo-terminal (PTY) layer, it is program- and
-session-independent: it works with plain shells, full-screen ncurses apps
-(`htop`, `vim`), and even nested remote sessions (`ssh` → `tmux`/`screen` → any
-program), since everything is just a byte stream flowing through.
+relai is also **host transparent**. It processes the PTY byte stream, so it
+travels with you across `ssh` hops and nested `tmux`/`screen` sessions — the
+agent keeps working on the far side without any agent or API key installed on
+the remote host. Your session, wherever it goes, carries the agent along.
+
+The human is in control by default. relai just relays — until you summon the
+agent. Once you do, it can:
+
+- **Run commands** on your behalf (and read back their output).
+- **Control interactive applications** by sending real keystrokes — edit in
+  `vim`, page through `less`, drive a Python REPL, and so on.
+- **Focus on specific parts of the screen, including scrollback history**, so it
+  can reason about exactly what you are looking at, not just the last line.
 
 ## Status
 
-Early prototype. Current milestone: **transparent passthrough** — spawn a
-command, render it through a `pyte` screen model, and let you interact with it
-exactly as if relai weren't there.
-
-Planned next: an AI overlay hotkey and the agentic loop.
+Working prototype. Transparent passthrough, an on-demand AI panel (a resizable
+bottom split), the agentic tool-calling loop, and screen/scrollback inspection
+are all implemented.
 
 ## Setup
 
@@ -38,11 +50,29 @@ relai -- ssh user@host
 
 Exit by exiting the spawned program (e.g. `exit` in the shell).
 
-### In-session commands
+### Summoning the agent
+
+Press **Ctrl-O** to open (or close) the AI panel — a bottom split where you type
+to the agent while your program keeps running above. Ctrl-O is used because
+`screen` (Ctrl-A) and `tmux` (Ctrl-B) leave it alone, so it works even inside
+nested sessions.
+
+Inside the panel:
+
+- Type your request and press **Enter** to send it; **Esc** or **Ctrl-O** closes
+  the panel. The input line is a full editor — arrow keys, Home/End, Ctrl-A/E,
+  Ctrl-U/K/W, and mouse (bracketed) paste all work.
+- **Up / Down** scroll the conversation; **PageUp / PageDown** scroll by a page.
+- **Ctrl-G Up / Down** grow or shrink the panel one row; **Ctrl-G PageUp** snaps
+  it to half the screen and **Ctrl-G PageDown** restores the previous height.
+
+### Prefix commands
 
 Press the prefix key (default **Ctrl-G**), then a command letter:
 
+- `Ctrl-G` `a` — open the AI panel (same as Ctrl-O)
 - `Ctrl-G` `s` — open the scrollback viewer
+- `Ctrl-G` `o` — send a literal Ctrl-O byte to the program underneath
 - `Ctrl-G` `Ctrl-G` — send a literal prefix byte to the program underneath
 
 Change the prefix with `--prefix` (e.g. `relai --prefix ctrl-o`).
@@ -103,3 +133,19 @@ ncurses apps, and nested remote sessions alike.
 
 The result of the injected input appears on the terminal screen, which the agent
 can then read back and act on.
+
+### `capture_screen_history`
+
+`capture_screen_history` lets the agent focus on a specific part of the screen,
+including content that has scrolled off the top. It reads the full logical buffer
+(scrollback plus the current viewport) and returns a slice of it, so the agent
+can go back and inspect earlier output rather than only the visible rows.
+
+| Field    | Description                                                        |
+|----------|--------------------------------------------------------------------|
+| `offset` | Where to start; a negative value counts lines above the current position. |
+| `length` | How many lines to return.                                          |
+
+Because the injected-input result and the screen history both come from relai's
+own `pyte` model of the terminal, the agent always sees exactly what you see —
+across plain shells, full-screen apps, and remote sessions alike.
