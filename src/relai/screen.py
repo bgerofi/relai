@@ -68,13 +68,22 @@ class RelaiScreen(pyte.HistoryScreen):
         cursor is not already at the bottom of a full screen. Instead we shrink
         like xterm: rows only scroll off the top (into scrollback) when the
         cursor would otherwise fall outside the smaller screen; the unused space
-        below the cursor is simply dropped. Growing rows and any column change
-        are delegated to pyte.
+        below the cursor is simply dropped.
+
+        Growing is the exact inverse: rows are pulled back out of scrollback and
+        the viewport is shifted down, so a shrink followed by a grow (e.g.
+        opening then closing the AI panel) restores the screen to precisely the
+        state it had before -- including trailing blank lines -- and, because it
+        reconstructs from live scrollback, it stays correct even when the child
+        produced new output while the screen was smaller. Column changes are
+        delegated to pyte.
         """
         lines = lines if lines is not None else self.lines
         columns = columns if columns is not None else self.columns
         if lines < self.lines:
             self._shrink_lines(lines)
+        elif lines > self.lines:
+            self._grow_lines(lines)
         super().resize(lines, columns)
         if self.cursor.y >= self.lines:
             self.cursor.y = self.lines - 1
@@ -101,6 +110,39 @@ class RelaiScreen(pyte.HistoryScreen):
         # Drop everything below the new bottom row.
         for y in range(new_lines, self.lines):
             buffer.pop(y, None)
+        self.lines = new_lines
+        self.set_margins()
+
+    def _grow_lines(self, new_lines: int) -> None:
+        """Grow the screen to ``new_lines`` rows, restoring recent scrollback.
+
+        This is the inverse of :meth:`_shrink_lines`: the rows that most
+        recently scrolled off the top (``history.top``) are pulled back in and
+        the current viewport is shifted down to make room, exactly like paging
+        up. A full-screen app (alternate buffer) repaints itself on resize, so
+        in that case we add blank rows at the bottom instead of touching the
+        scrollback.
+        """
+        added = new_lines - self.lines
+        if added <= 0 or self.in_alt_screen:
+            return  # let pyte add blank rows at the bottom
+        mid = min(added, len(self.history.top))
+        if mid <= 0:
+            return
+        buffer = self.buffer
+        # Shift the existing viewport down by ``mid`` rows.
+        for y in range(new_lines - 1, mid - 1, -1):
+            src = y - mid
+            if src in buffer:
+                buffer[y] = buffer[src]
+            else:
+                buffer.pop(y, None)
+        # Refill the freed top rows from scrollback; the most recently
+        # scrolled-off line (rightmost in history.top) sits just above the old
+        # viewport top, matching pyte's own prev_page ordering.
+        for y in range(mid - 1, -1, -1):
+            buffer[y] = self.history.top.pop()
+        self.cursor.y = min(self.cursor.y + mid, new_lines - 1)
         self.lines = new_lines
         self.set_margins()
 

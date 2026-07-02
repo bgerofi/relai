@@ -42,8 +42,16 @@ if TYPE_CHECKING:
 #
 # Default prefix: Ctrl-G (0x07). Commands:
 #   <prefix> s          open the scrollback viewer
+#   <prefix> a          open the AI panel (same as the summon key)
+#   <prefix> o          send a literal summon byte (Ctrl-O) to the child
 #   <prefix> <prefix>   send a literal prefix byte to the child
 DEFAULT_PREFIX = b"\x07"  # Ctrl-G
+
+# In addition to the prefix commands, a single dedicated "summon" key opens the
+# AI panel in one keystroke. Ctrl-O (0x0F) is used because screen (Ctrl-A) and
+# tmux (Ctrl-B) leave it alone, so it works even when relai runs inside them.
+# To send a literal Ctrl-O to the child, use ``<prefix> o``.
+DEFAULT_SUMMON = b"\x0f"  # Ctrl-O
 
 
 def _get_winsize(fd: int) -> tuple[int, int]:
@@ -85,6 +93,10 @@ class Relai:
     prefix:
         The single-byte prefix key that introduces a relai command. Defaults to
         Ctrl-G. Pressing it twice sends a literal prefix byte to the child.
+    summon:
+        The single-byte key that opens the AI panel in one keystroke. Defaults
+        to Ctrl-O, which screen/tmux leave alone. Use ``<prefix> o`` to send a
+        literal summon byte to the child.
     llm:
         An optional, already-verified LLM client. When ``None``, relai runs as a
         plain relay with AI features disabled.
@@ -103,10 +115,12 @@ class Relai:
         self,
         command: Sequence[str],
         prefix: bytes = DEFAULT_PREFIX,
+        summon: bytes = DEFAULT_SUMMON,
         llm: "LLMClient | None" = None,
     ) -> None:
         self.command = list(command)
         self.prefix = prefix
+        self.summon = summon
         self.llm = llm
         self._child_pid: int = -1
         self._master_fd: int = -1
@@ -303,6 +317,9 @@ class Relai:
             elif byte == self.prefix:
                 # Enter command mode; the next byte selects the command.
                 self._awaiting_command = True
+            elif byte == self.summon:
+                # Single-key summon: open the AI panel immediately.
+                self._open_panel()
             else:
                 self._write_all(self._master_fd, byte)
 
@@ -311,6 +328,9 @@ class Relai:
         if byte == self.prefix:
             # Doubled prefix -> send a literal prefix byte to the child.
             self._write_all(self._master_fd, self.prefix)
+        elif byte in (b"o", b"O"):
+            # Send a literal summon byte (Ctrl-O) to the child.
+            self._write_all(self._master_fd, self.summon)
         elif byte in (b"s", b"S"):
             self._open_scrollback_viewer()
         elif byte in (b"a", b"A"):
@@ -475,6 +495,9 @@ class Relai:
         if self._awaiting_command:
             self._awaiting_command = False
             self._panel_command(data)
+            return
+        if data == self.summon:
+            self._panel_closing = True  # summon key toggles the panel closed
             return
         if data == self.prefix:
             self._awaiting_command = True

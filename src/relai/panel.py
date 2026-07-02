@@ -133,7 +133,7 @@ class AiPanel:
         label = f" relai · {self.provider} " if self.provider else " relai "
         if self.thinking:
             label += f"· {self.activity} "
-        hints = "^G a:close  ^G Up/Dn:resize  PgUp/Dn:scroll "
+        hints = "^O/Esc:close  ^G Up/Dn:resize  PgUp/Dn:scroll "
         if more_above > 0:
             hints = f"\u2191{more_above} more  " + hints
         text = (label + "· " + hints)[: self.cols].ljust(self.cols)
