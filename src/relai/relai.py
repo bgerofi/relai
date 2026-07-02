@@ -105,11 +105,17 @@ class Relai:
     #: How many bytes to read from a fd at a time.
     READ_SIZE = 65536
 
-    #: How often (seconds) to re-check whether injected input has settled.
-    INJECT_SETTLE_INTERVAL = 0.25
+    #: Completion detection polls the screen model this often (seconds). The
+    #: main split loop feeds the PTY on its own thread, so this only reads.
+    SETTLE_POLL = 0.05
 
-    #: Max number of settle checks before giving up and returning the screen.
-    INJECT_SETTLE_POLLS = 20
+    #: How long the screen must stay unchanged before the (patient) quiescence
+    #: fallback considers a prompt-less context settled. Kept large so a normal
+    #: command's brief silence never pre-empts the fast prompt-return path.
+    SETTLE_QUIET_WINDOW = 1.30
+
+    #: Absolute cap (seconds) on how long to wait for injected input to settle.
+    SETTLE_MAX_WAIT = 120.0
 
     def __init__(
         self,
@@ -782,13 +788,14 @@ class Relai:
         ``interpret_escapes=false`` to send the text verbatim.
 
         After injecting, the command's output is not available immediately and we
-        cannot know when it finishes. So relai polls the screen every
-        ``INJECT_SETTLE_INTERVAL`` seconds and, on each poll, makes a separate
-        out-of-band ``status check`` LLM call (NOT part of the conversation
-        history) asking whether the injected input still looks in progress. Once
-        it looks settled -- or a cap is hit -- the tool result returns the
-        up-to-date screen snapshot, so the main conversation continues with what
-        the injected input actually produced.
+        cannot know when it finishes. relai learns the prompt from the cursor
+        line captured just before injection and watches the screen model: when
+        that prompt returns (any shell/REPL), or output goes quiet, the input is
+        settled. Only an ambiguous quiet screen with no recognizable prompt
+        falls back to a one-off out-of-band LLM ``status check`` (never part of
+        the conversation history). The tool result then returns the up-to-date
+        screen snapshot so the main conversation continues with what the
+        injected input actually produced.
         """
         text = args.get("text", "")
         if not isinstance(text, str):
@@ -801,11 +808,12 @@ class Relai:
             data += b"\r"
         if not data:
             return "[relai] inject_input: nothing to inject (empty 'text')."
+        prompt_prefix = self._current_prompt_prefix()
         try:
             self._write_all(self._master_fd, data)
         except OSError as exc:
             return f"[relai] inject_input failed: {exc}"
-        snapshot = self._wait_for_injection_to_settle(text)
+        snapshot = self._wait_for_injection_to_settle(text, prompt_prefix)
         return (
             f"Injected {len(data)} byte(s) into the terminal. The input was sent "
             "to the foreground program and its output has settled. This is the "
@@ -875,23 +883,80 @@ class Relai:
                 i += 2
         return bytes(out)
 
-    def _wait_for_injection_to_settle(self, injected: str) -> str:
-        """Poll the screen until the injected input looks finished.
+    def _current_prompt_prefix(self) -> str:
+        """Learn the current prompt: the cursor line up to the cursor column.
 
-        The main split loop keeps feeding the PTY output into the screen model on
-        its own thread while this (worker-thread) method sleeps between polls, so
-        each snapshot reflects the latest output.
+        Captured just before injecting, this is exactly the prompt string the
+        shell/REPL is showing (nothing has been typed yet), with no dependence
+        on hardcoded ``$``/``#`` markers -- so it generalizes across shells and
+        interactive programs. Returns ``""`` if it cannot be read.
         """
-        snapshot = self.snapshot_text()
-        for _ in range(self.INJECT_SETTLE_POLLS):
-            time.sleep(self.INJECT_SETTLE_INTERVAL)
-            try:
-                snapshot = self.snapshot_text()
-            except Exception:
+        try:
+            row = self.screen.display[self.screen.cursor.y]
+            return row[: self.screen.cursor.x]
+        except Exception:
+            return ""
+
+    def _prompt_returned(self, prompt_prefix: str) -> bool:
+        """True when the learned prompt is back with nothing typed after it."""
+        plen = len(prompt_prefix)
+        if not plen:
+            return False
+        try:
+            if self.screen.cursor.x != plen:
+                return False
+            return self.screen.display[self.screen.cursor.y][:plen] == prompt_prefix
+        except Exception:
+            return False
+
+    def _wait_for_injection_to_settle(
+        self, injected: str, prompt_prefix: str = ""
+    ) -> str:
+        """Poll the screen model until the injected input looks finished.
+
+        Fast path: as soon as the learned prompt returns (a shell/REPL is ready
+        for the next command), we are done -- no LLM call. Fallback: if the
+        screen instead goes quiet with no recognizable prompt, confirm once with
+        the out-of-band LLM status check, backing off (widening the quiet
+        window) if it is actually still running. The main split loop feeds the
+        PTY into the model on its own thread while this worker-thread method
+        sleeps between polls, so each snapshot reflects the latest output.
+        """
+        quiet_window = self.SETTLE_QUIET_WINDOW
+        deadline = time.time() + self.SETTLE_MAX_WAIT
+        last_text = self._safe_snapshot() or ""
+        last_change = time.time()
+        changed_once = False
+        while time.time() < deadline:
+            time.sleep(self.SETTLE_POLL)
+            text = self._safe_snapshot()
+            if text is None:
                 continue  # transient read during a concurrent feed; retry
-            if self._injection_finished(injected, snapshot):
-                break
-        return snapshot
+            now = time.time()
+            if text != last_text:
+                last_text = text
+                last_change = now
+                changed_once = True
+            # Fast path: the learned prompt is back -> command finished.
+            if changed_once and self._prompt_returned(prompt_prefix):
+                return text
+            # Fallback: a quiet screen with no prompt match. Be patient, then
+            # confirm with the LLM (if any) so we do not misjudge a pause.
+            if changed_once and (now - last_change) >= quiet_window:
+                if self.llm is None:
+                    return text
+                if self._injection_finished(injected, text):
+                    return text
+                last_change = now  # really still running; back off
+                quiet_window = min(quiet_window * 2, 2.0)
+        return last_text
+
+    def _safe_snapshot(self) -> str | None:
+        """Snapshot the screen, returning ``None`` on a transient read error."""
+        try:
+            return self.snapshot_text()
+        except Exception:
+            return None
 
     def _injection_finished(self, injected: str, screen_text: str) -> bool:
         """Out-of-band status check: does the injected input look done?
