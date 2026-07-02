@@ -1,9 +1,8 @@
-# relai
+# RelAI
 
-**relai** is an AI agent that lives in your terminal. It spawns a command (your
-shell by default) and sits transparently on the character stream between you and
-that program, so the agent is always one keystroke away — no matter what you are
-running.
+**relai** is an AI agent that lives in your terminal. It sits transparently on the
+character stream between you and whatever program you run. The agent is always
+one keystroke away, no matter where and what you are running.
 
 Because relai operates at the pseudo-terminal (PTY) layer rather than inside any
 particular application, it integrates **seamlessly with any terminal and any
