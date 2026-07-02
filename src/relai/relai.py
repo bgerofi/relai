@@ -665,11 +665,18 @@ class Relai:
                         "text": {
                             "type": "string",
                             "description": (
-                                "The exact characters to type. For a shell "
-                                "command this is the command line, e.g. 'ls -la'. "
-                                "May include control characters such as \\x03 "
-                                "(Ctrl-C) or \\t (Tab). A trailing newline, or "
-                                "submit=true, is needed to run a shell command."
+                                "The characters to type. For a shell command "
+                                "this is the command line, e.g. 'ls -la'. "
+                                "Backslash escapes are interpreted (unless "
+                                "interpret_escapes=false) so you CAN send "
+                                "control keys: use \\xHH for a raw byte (e.g. "
+                                "\\x06 = Ctrl-F, \\x1b = Esc), \\cX for a control "
+                                "key (e.g. \\cf = Ctrl-F), plus \\e (Esc), \\t "
+                                "(Tab), \\r (Enter), \\n (newline). Write \\\\ for "
+                                "a literal backslash. Raw control BYTES do not "
+                                "survive here -- always express control keys with "
+                                "these escapes. A trailing newline (or "
+                                "submit=true) is needed to run a shell command."
                             ),
                         },
                         "submit": {
@@ -677,6 +684,15 @@ class Relai:
                             "description": (
                                 "If true, press Enter (send a carriage return) "
                                 "after the text to execute it. Defaults to false."
+                            ),
+                        },
+                        "interpret_escapes": {
+                            "type": "boolean",
+                            "description": (
+                                "Whether to decode backslash escapes in 'text' "
+                                "(\\xHH, \\cX, \\e, \\t, \\r, \\n, \\\\). Defaults "
+                                "to true. Set false to send 'text' verbatim, "
+                                "e.g. when typing literal backslashes."
                             ),
                         },
                     },
@@ -735,6 +751,12 @@ class Relai:
     def _tool_inject_input(self, args: dict) -> str:
         """Inject keystrokes into the child PTY (relai performs the tool call).
 
+        Control keys cannot survive as raw bytes in the model's JSON tool
+        arguments, so ``text`` is decoded for backslash escapes by default
+        (``\\xHH``, ``\\cX``, ``\\e``, ``\\t``, ``\\r``, ``\\n``, ``\\\\``) --
+        letting the model page down in vim with ``\\x06`` etc. Pass
+        ``interpret_escapes=false`` to send the text verbatim.
+
         After injecting, the command's output is not available immediately and we
         cannot know when it finishes. So relai polls the screen every
         ``INJECT_SETTLE_INTERVAL`` seconds and, on each poll, makes a separate
@@ -747,9 +769,14 @@ class Relai:
         text = args.get("text", "")
         if not isinstance(text, str):
             return "[relai] inject_input: 'text' must be a string."
+        if args.get("interpret_escapes", True):
+            data = self._decode_escapes(text)
+        else:
+            data = text.encode("utf-8", "replace")
         if args.get("submit"):
-            text += "\r"
-        data = text.encode("utf-8", "replace")
+            data += b"\r"
+        if not data:
+            return "[relai] inject_input: nothing to inject (empty 'text')."
         try:
             self._write_all(self._master_fd, data)
         except OSError as exc:
@@ -763,6 +790,66 @@ class Relai:
             f"{snapshot}\n"
             "</screenContext>"
         )
+
+    @staticmethod
+    def _decode_escapes(text: str) -> bytes:
+        """Decode C-style backslash escapes in ``text`` into raw bytes.
+
+        Supports ``\\n \\r \\t \\e \\a \\b \\f \\v \\\\ \\' \\"``, ``\\xHH`` (1-2
+        hex digits), ``\\ooo`` (1-3 octal digits), and ``\\cX`` (control key, e.g.
+        ``\\cf`` -> Ctrl-F). Unknown escapes and a trailing backslash are kept
+        literally. Non-escaped characters are encoded as UTF-8.
+        """
+        simple = {
+            "n": 0x0A, "r": 0x0D, "t": 0x09, "e": 0x1B, "a": 0x07,
+            "b": 0x08, "f": 0x0C, "v": 0x0B, "\\": 0x5C, "'": 0x27, '"': 0x22,
+        }
+        out = bytearray()
+        i, n = 0, len(text)
+        while i < n:
+            ch = text[i]
+            if ch != "\\":
+                out += ch.encode("utf-8", "replace")
+                i += 1
+                continue
+            if i + 1 >= n:
+                out += b"\\"  # trailing backslash kept literal
+                break
+            nxt = text[i + 1]
+            if nxt in simple:
+                out.append(simple[nxt])
+                i += 2
+            elif nxt in "xX":
+                digits = ""
+                j = i + 2
+                while j < n and len(digits) < 2 and text[j] in "0123456789abcdefABCDEF":
+                    digits += text[j]
+                    j += 1
+                if digits:
+                    out.append(int(digits, 16))
+                    i = j
+                else:
+                    out += b"\\x"  # malformed -> keep literal
+                    i += 2
+            elif nxt in "cC":
+                if i + 2 < n:
+                    out.append(ord(text[i + 2].upper()) ^ 0x40)
+                    i += 3
+                else:
+                    out += b"\\c"
+                    i += 2
+            elif nxt in "01234567":
+                digits = ""
+                j = i + 1
+                while j < n and len(digits) < 3 and text[j] in "01234567":
+                    digits += text[j]
+                    j += 1
+                out.append(int(digits, 8) & 0xFF)
+                i = j
+            else:
+                out += ("\\" + nxt).encode("utf-8", "replace")
+                i += 2
+        return bytes(out)
 
     def _wait_for_injection_to_settle(self, injected: str) -> str:
         """Poll the screen until the injected input looks finished.
