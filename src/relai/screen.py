@@ -58,6 +58,52 @@ class RelaiScreen(pyte.HistoryScreen):
         # can truncate back to it on exit and drop the app's repaint noise.
         self._history_len_on_alt_enter: int | None = None
 
+    # -- resize --------------------------------------------------------------
+
+    def resize(self, lines: int | None = None, columns: int | None = None) -> None:
+        """Resize the screen the way a real terminal does.
+
+        pyte's own :meth:`pyte.Screen.resize` shrinks by removing lines from the
+        *top* unconditionally, which throws away visible content whenever the
+        cursor is not already at the bottom of a full screen. Instead we shrink
+        like xterm: rows only scroll off the top (into scrollback) when the
+        cursor would otherwise fall outside the smaller screen; the unused space
+        below the cursor is simply dropped. Growing rows and any column change
+        are delegated to pyte.
+        """
+        lines = lines if lines is not None else self.lines
+        columns = columns if columns is not None else self.columns
+        if lines < self.lines:
+            self._shrink_lines(lines)
+        super().resize(lines, columns)
+        if self.cursor.y >= self.lines:
+            self.cursor.y = self.lines - 1
+        if self.cursor.x >= self.columns:
+            self.cursor.x = self.columns - 1
+
+    def _shrink_lines(self, new_lines: int) -> None:
+        """Reduce the screen to ``new_lines`` rows, preserving recent content."""
+        buffer = self.buffer
+        self.cursor.y = min(self.cursor.y, self.lines - 1)
+        overflow = max(0, (self.cursor.y + 1) - new_lines)
+        if overflow:
+            # These top rows genuinely fall off the smaller screen -> scrollback.
+            if not self.in_alt_screen:
+                for y in range(overflow):
+                    self.history.top.append(buffer[y])
+            for y in range(self.lines):
+                src = y + overflow
+                if src in buffer:
+                    buffer[y] = buffer[src]
+                else:
+                    buffer.pop(y, None)
+            self.cursor.y -= overflow
+        # Drop everything below the new bottom row.
+        for y in range(new_lines, self.lines):
+            buffer.pop(y, None)
+        self.lines = new_lines
+        self.set_margins()
+
     # -- mode tracking -------------------------------------------------------
 
     def set_mode(self, *modes: int, **kwargs) -> None:

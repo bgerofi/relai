@@ -14,21 +14,21 @@ import errno
 import fcntl
 import os
 import pty
-import re
 import select
 import shutil
 import signal
 import struct
 import sys
 import termios
-import time
+import threading
 import tty
 from typing import TYPE_CHECKING, Sequence
 
 import pyte
 
-from .overlay import AIPanel, ScrollbackViewer
-from .inline import InlineChat
+from .overlay import ScrollbackViewer
+from .panel import AiPanel
+from .render import Compositor, render_row
 from .screen import RelaiScreen
 
 if TYPE_CHECKING:
@@ -109,6 +109,20 @@ class Relai:
         # True after the prefix key was pressed, while waiting for the command
         # letter (the next byte selects the relai command).
         self._awaiting_command = False
+        # AI panel state. ``_panel`` is non-None only while the split is open;
+        # ``_panel_messages`` keeps the transcript alive across toggles.
+        self._panel: AiPanel | None = None
+        self._panel_closing = False
+        self._panel_messages: list[tuple[str, str]] = []
+        self._compositor: Compositor | None = None
+        self._panel_height = 10
+        self._phys_rows = 0
+        self._phys_cols = 0
+        self._ai_ask = None
+        # Background LLM request while the panel spinner animates.
+        self._ask_thread: threading.Thread | None = None
+        self._ask_result = ""
+        self._ask_done = threading.Event()
 
         rows, cols = _get_winsize(self._stdout_fd)
         # pyte keeps a live model of what the child has drawn on screen, plus a
@@ -288,7 +302,7 @@ class Relai:
         elif byte in (b"s", b"S"):
             self._open_scrollback_viewer()
         elif byte in (b"a", b"A"):
-            self._open_ai_panel()
+            self._open_panel()
         # Unknown command letters are ignored (not forwarded), matching the
         # screen/tmux convention of swallowing unrecognized prefix commands.
 
@@ -298,19 +312,6 @@ class Relai:
         lines = self.screen.full_text(include_scrollback=True)
         viewer = ScrollbackViewer(self._stdout_fd, self._stdin_fd, rows, cols)
         viewer.show(lines)
-
-    def _open_ai_panel(self) -> None:
-        """Open the AI chat.
-
-        In line-oriented mode the exchange is injected inline into the scroll
-        flow. While a full-screen (alternate-buffer) app is active there is no
-        scroll flow to inject into, so the temporary overlay panel is used
-        instead.
-        """
-        if self.screen.in_alt_screen:
-            self._open_ai_overlay()
-        else:
-            self._open_ai_inline()
 
     def _ai_ask_callback(self):
         """Return the ``ask`` callable and a short provider label."""
@@ -325,71 +326,231 @@ class Relai:
             return ask, "no LLM"
         return self._ask_llm, f"{self.llm.name}:{self.llm.model}"
 
-    def _open_ai_inline(self) -> None:
-        """Inject an AI question/answer exchange inline, above the prompt."""
-        _rows, cols = _get_winsize(self._stdout_fd)
-        # Ask the real terminal where the cursor actually is. This is immune to
-        # any drift between relai's screen model and the physical screen (e.g.
-        # relai's own startup banner, which the model never saw).
-        pos = self._query_cursor()
-        if pos is not None:
-            prompt_row, cursor_col = pos[0], pos[1] - 1  # -> 1-based row, 0-based col
-        else:
-            prompt_row = self.screen.cursor.y + 1
-            cursor_col = self.screen.cursor.x
+    # -- AI panel (bottom split) --------------------------------------------
 
-        ask, provider = self._ai_ask_callback()
-        chat = InlineChat(self._stdout_fd, self._stdin_fd, cols)
-        chat.run(prompt_row, cursor_col, ask, provider)
+    def _open_panel(self) -> None:
+        """Open the AI panel as a bottom split and run it until it is closed.
 
-    def _query_cursor(self, timeout: float = 0.5):
-        """Return the physical cursor as ``(row, col)`` (1-based) via DSR.
-
-        Sends a Device Status Report request (``ESC[6n``) and parses the
-        terminal's ``ESC[<row>;<col>R`` reply. Any bytes the user typed while we
-        waited are re-processed as normal input. Returns ``None`` on timeout.
+        The application is resized to the region above the panel (it just sees a
+        smaller terminal, via SIGWINCH) and relai switches from passthrough to
+        compositing: the child draws into the pyte model, which relai renders
+        onto the top region while owning the panel rows below.
         """
-        self._write_all(self._stdout_fd, b"\x1b[6n")
-        buf = b""
-        deadline = time.time() + timeout
-        while True:
-            remaining = deadline - time.time()
-            if remaining <= 0:
-                break
-            r, _, _ = select.select([self._stdin_fd], [], [], remaining)
-            if not r:
-                break
-            try:
-                chunk = os.read(self._stdin_fd, 64)
-            except OSError:
-                break
-            if not chunk:
-                break
-            buf += chunk
-            if b"R" in buf:
-                break
-
-        match = re.search(rb"\x1b\[(\d+);(\d+)R", buf)
-        if match is None:
-            if buf:
-                self._handle_input(buf)  # not a DSR reply: treat as user input
-            return None
-        # Forward any stray bytes around the report as normal input.
-        leftover = buf[: match.start()] + buf[match.end():]
-        if leftover:
-            self._handle_input(leftover)
-        return int(match.group(1)), int(match.group(2))
-
-    def _open_ai_overlay(self) -> None:
-        """Prompt for a question in the overlay panel and show the reply."""
         rows, cols = _get_winsize(self._stdout_fd)
-        panel = AIPanel(self._stdout_fd, self._stdin_fd, rows, cols)
+        if rows < 5 or cols < 10:
+            return  # too small to usefully split
+        self._phys_rows, self._phys_cols = rows, cols
+        height = max(3, min(self._panel_height, rows - 2))
+        self._panel_height = height
+
         ask, provider = self._ai_ask_callback()
-        if self.llm is None:
-            panel.run(ask, footer="relai · no LLM · press Enter")
+        self._ai_ask = ask
+        self._panel = AiPanel(cols, height, provider)
+        self._panel.restore(self._panel_messages)
+        self._panel_closing = False
+
+        self._apply_split_size()
+        self._compositor = Compositor(rows, cols)
+        self._write_all(self._stdout_fd, b"\x1b[?25h" + self._compositor.clear())
+        self._render_split()
+        try:
+            self._split_loop()
+        finally:
+            self._leave_split()
+
+    def _apply_split_size(self) -> None:
+        """Resize the model and child PTY to the region above the panel."""
+        app_rows = max(1, self._phys_rows - self._panel_height)
+        self.screen.resize(app_rows, self._phys_cols)
+        _set_winsize(self._master_fd, app_rows, self._phys_cols)
+
+    def _split_loop(self) -> None:
+        master = self._master_fd
+        stdin = self._stdin_fd
+        while not self._panel_closing:
+            if self._resized:
+                self._handle_split_resize()
+            # While waiting on the LLM, wake up periodically to advance the
+            # spinner animation.
+            timeout = 0.12 if (self._panel and self._panel.thinking) else None
+            try:
+                readable, _, _ = select.select([master, stdin], [], [], timeout)
+            except InterruptedError:
+                continue
+            if master in readable:
+                data = self._read(master)
+                if data is None:  # child exited
+                    self._panel_closing = True
+                    break
+                if data:
+                    self.stream.feed(data)
+                    self._render_split()
+            if stdin in readable:
+                data = self._read(stdin)
+                if data:
+                    self._panel_input(data)
+                    if not self._panel_closing:
+                        self._render_split()
+            if self._panel is not None and self._panel.thinking:
+                if self._ask_done.is_set():
+                    self._finish_ask()
+                else:
+                    self._panel.tick += 1
+                    self._render_split()
+
+    def _handle_split_resize(self) -> None:
+        """Re-lay-out the split after the real terminal changed size."""
+        self._resized = False
+        rows, cols = _get_winsize(self._stdout_fd)
+        self._phys_rows, self._phys_cols = rows, cols
+        self._panel_height = max(3, min(self._panel_height, rows - 2))
+        self._panel.height = self._panel_height
+        self._panel.set_cols(cols)
+        self._apply_split_size()
+        self._compositor = Compositor(rows, cols)
+        self._write_all(self._stdout_fd, self._compositor.clear())
+        self._render_split()
+
+    def _resize_panel(self, delta: int) -> None:
+        """Grow (delta>0) or shrink (delta<0) the panel by ``delta`` rows."""
+        height = max(3, min(self._panel_height + delta, self._phys_rows - 2))
+        if height == self._panel_height:
             return
-        footer = f"relai · {provider} · Enter to send · Esc to cancel"
-        panel.run(ask, footer=footer)
+        self._panel_height = height
+        self._panel.height = height
+        self._apply_split_size()
+        self._compositor = Compositor(self._phys_rows, self._phys_cols)
+        self._write_all(self._stdout_fd, self._compositor.clear())
+        self._render_split()
+
+    def _render_split(self) -> None:
+        """Composite the app region (from the model) and the panel to screen."""
+        comp = self._compositor
+        panel = self._panel
+        if comp is None or panel is None:
+            return
+        cols = self._phys_cols
+        app_rows = self.screen.lines
+        out = bytearray()
+        for y in range(app_rows):
+            out += comp.row_update(y, render_row(self.screen, y, cols))
+        for i, payload in enumerate(panel.render(panel.height, cols)):
+            out += comp.row_update(app_rows + i, payload)
+        out += b"\x1b[%d;%dH" % (self._phys_rows, panel.cursor_col())
+        self._write_all(self._stdout_fd, out)
+
+    def _leave_split(self) -> None:
+        """Tear down the split: resize the app back and restore the screen."""
+        rows, cols = self._phys_rows, self._phys_cols
+        if self._panel is not None:
+            self._panel_messages = self._panel.messages  # keep for next toggle
+        self.screen.resize(rows, cols)
+        _set_winsize(self._master_fd, rows, cols)
+        self._compositor = None
+        self._panel = None
+        # Repaint the full-size app from the model; the child's own SIGWINCH
+        # redraw will then flow in via passthrough and stay consistent.
+        out = bytearray(b"\x1b[?25h\x1b[2J")
+        for y in range(rows):
+            out += b"\x1b[%d;1H" % (y + 1) + render_row(self.screen, y, cols)
+        out += b"\x1b[%d;%dH" % (self.screen.cursor.y + 1, self.screen.cursor.x + 1)
+        self._write_all(self._stdout_fd, out)
+
+    # -- panel input ---------------------------------------------------------
+
+    def _panel_input(self, data: bytes) -> None:
+        """Route a stdin read to the panel (editing, scrolling, commands)."""
+        if self._awaiting_command:
+            self._awaiting_command = False
+            self._panel_command(data)
+            return
+        if data == self.prefix:
+            self._awaiting_command = True
+            return
+        if data[:1] == self.prefix and len(data) > 1:
+            self._panel_command(data[1:])
+            return
+        self._panel_key(data)
+
+    def _panel_command(self, key: bytes) -> None:
+        """Handle a prefix command while the panel is open."""
+        if key in (b"a", b"A"):
+            self._panel_closing = True  # toggle closed
+        elif key in (b"\x1b[A", b"\x1bOA"):  # Up -> grow panel
+            self._resize_panel(1)
+        elif key in (b"\x1b[B", b"\x1bOB"):  # Down -> shrink panel
+            self._resize_panel(-1)
+
+    def _panel_key(self, key: bytes) -> None:
+        """Handle a normal keystroke while the panel is focused."""
+        panel = self._panel
+        if key in (b"\r", b"\n"):
+            self._panel_submit()
+        elif key in (b"\x7f", b"\x08"):
+            panel.backspace()
+        elif key == b"\x1b":  # bare Esc closes
+            self._panel_closing = True
+        elif key in (b"\x1b[A", b"\x1bOA"):
+            panel.scroll_up(1)
+        elif key in (b"\x1b[B", b"\x1bOB"):
+            panel.scroll_down(1)
+        elif key == b"\x1b[5~":  # PageUp
+            panel.scroll_up(max(1, panel.height - 2))
+        elif key == b"\x1b[6~":  # PageDown
+            panel.scroll_down(max(1, panel.height - 2))
+        elif key[:1] == b"\x1b":
+            return  # ignore other escape sequences
+        else:
+            try:
+                text = key.decode("utf-8")
+            except UnicodeDecodeError:
+                return
+            text = "".join(ch for ch in text if ch >= " ")
+            if text:
+                panel.type_text(text)
+
+    def _panel_submit(self) -> None:
+        """Send the typed question to the LLM on a background thread.
+
+        The request runs off the render loop so the spinner keeps animating and
+        the application region keeps updating while we wait for the reply.
+        """
+        panel = self._panel
+        if panel.thinking:
+            return
+        question = panel.take_input()
+        if not question:
+            return
+        panel.add_user(question)
+        panel.thinking = True
+        panel.tick = 0
+        self._render_split()  # show the question and the spinner immediately
+
+        ask = self._ai_ask
+        self._ask_done = threading.Event()
+
+        def worker() -> None:
+            try:
+                result = ask(question)
+            except Exception as exc:  # surfaced to the user, never crashes relai
+                result = f"[relai] request failed: {exc}"
+            self._ask_result = result
+            self._ask_done.set()
+
+        self._ask_thread = threading.Thread(target=worker, daemon=True)
+        self._ask_thread.start()
+
+    def _finish_ask(self) -> None:
+        """Deliver the completed background reply into the panel."""
+        if self._ask_thread is not None:
+            self._ask_thread.join(timeout=1)
+            self._ask_thread = None
+        panel = self._panel
+        if panel is None:
+            return
+        panel.thinking = False
+        panel.add_reply(self._ask_result)
+        self._render_split()
 
     def _ask_llm(self, question: str) -> str:
         """Send the current screen plus the user's question to the LLM."""
