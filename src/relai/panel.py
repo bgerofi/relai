@@ -67,6 +67,15 @@ class AiPanel:
         self._messages.append(("info", text))
         self.scroll = 0
 
+    def add_system(self, text: str) -> None:
+        """Add an ephemeral in-panel note (slash-command echo/output).
+
+        System messages are shown like info lines but are never persisted to the
+        saved conversation nor sent to the LLM.
+        """
+        self._messages.append(("system", text))
+        self.scroll = 0
+
     def type_text(self, text: str) -> None:
         self.editor.insert(text)
         self.scroll = 0
@@ -126,6 +135,13 @@ class AiPanel:
                     for seg in _wrap(para, self.cols):
                         lines.append(
                             _DIM + seg.encode("utf-8", "replace") + _RESET + _EOL
+                        )
+            elif kind == "system":
+                for para in logical:
+                    for seg in _wrap(para, self.cols):
+                        lines.append(
+                            _CYAN + _DIM + seg.encode("utf-8", "replace")
+                            + _RESET + _EOL
                         )
             else:
                 for para in logical:

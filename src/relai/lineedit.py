@@ -81,6 +81,11 @@ class LineEditor:
 
     # -- whole-buffer --------------------------------------------------------
 
+    def set_text(self, text: str) -> None:
+        """Replace the whole buffer with ``text`` and put the cursor at its end."""
+        self.text = text
+        self.cursor = len(text)
+
     def clear(self) -> None:
         self.text = ""
         self.cursor = 0

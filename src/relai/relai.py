@@ -31,6 +31,12 @@ from .overlay import ScrollbackViewer
 from .panel import AiPanel
 from .render import Compositor, render_row
 from .screen import RelaiScreen
+from .session import (
+    SessionStore,
+    complete_slash,
+    list_sessions,
+    load_session,
+)
 from .llm import ToolSpec
 
 if TYPE_CHECKING:
@@ -272,6 +278,13 @@ class Relai:
         self._ask_thread: threading.Thread | None = None
         self._ask_result = ""
         self._ask_done = threading.Event()
+        # Persistent conversation store. Created lazily the first time the panel
+        # is opened (a fresh session per process) and reused across toggles; a
+        # ``/sessions load`` rebinds it to the loaded session's file.
+        self._session: SessionStore | None = None
+        # The session summaries from the most recent ``/sessions list``, so
+        # ``/sessions load <n>`` can resolve a 1-based index to a session id.
+        self._session_list: list[dict] = []
 
         rows, cols = _get_winsize(self._stdout_fd)
         # pyte keeps a live model of what the child has drawn on screen, plus a
@@ -497,6 +510,11 @@ class Relai:
         self._phys_rows, self._phys_cols = rows, cols
         height = max(3, min(self._panel_height, rows - 2))
         self._panel_height = height
+
+        # A fresh conversation is started the first time the panel opens in this
+        # process; later opens keep extending the same session file.
+        if self._session is None:
+            self._session = SessionStore()
 
         ask, provider = self._ai_ask_callback()
         self._ai_ask = ask
@@ -784,6 +802,8 @@ class Relai:
         elif key == b"\x17":  # Ctrl-W -> delete word back
             editor.delete_word_back()
             panel.scroll = 0
+        elif key == b"\t":  # Tab -> complete an internal slash command
+            self._complete_input()
         elif key[:1] == b"\x1b":
             return  # ignore other escape sequences
         else:
@@ -808,7 +828,114 @@ class Relai:
         question = panel.take_input()
         if not question:
             return
+        if question.startswith("/"):
+            self._handle_slash_command(question)
+            return
         self._start_ask(question, user_echo=question)
+
+    # -- session persistence & internal commands -----------------------------
+
+    def _persist_session(self) -> None:
+        """(Re)write the current conversation to its session file.
+
+        Reads the live transcript (or the retained copy when the panel is
+        closed). Slash-command output is filtered out by the store. A save
+        failure must never disturb the UI, so it is swallowed.
+        """
+        if self._session is None:
+            return
+        messages = (
+            self._panel.messages if self._panel is not None else self._panel_messages
+        )
+        try:
+            self._session.save(messages, self._llm_history)
+        except Exception:
+            pass
+
+    def _complete_input(self) -> None:
+        """Tab-complete the current input if it is an internal slash command."""
+        panel = self._panel
+        if panel is None:
+            return
+        completed = complete_slash(panel.editor.text)
+        if completed is not None and completed != panel.editor.text:
+            panel.editor.set_text(completed)
+            panel.scroll = 0
+
+    def _handle_slash_command(self, line: str) -> None:
+        """Run an internal (``/``-prefixed) command; never sent to the LLM.
+
+        The command echo and its output are shown as ephemeral "system" lines
+        that are not persisted to the saved conversation.
+        """
+        panel = self._panel
+        if panel is None:
+            return
+        panel.add_system(f"> {line}")
+        parts = line[1:].split()
+        cmd = parts[0] if parts else ""
+        args = parts[1:]
+        if cmd == "sessions":
+            self._cmd_sessions(args)
+        else:
+            panel.add_system(f"Unknown command: /{cmd or ''}")
+        self._render_split()
+
+    def _cmd_sessions(self, args: list[str]) -> None:
+        """Handle ``/sessions [list|load ...]``."""
+        panel = self._panel
+        if panel is None:
+            return
+        sub = args[0] if args else "list"
+        if sub == "list":
+            self._session_list = list_sessions()
+            if not self._session_list:
+                panel.add_system("No saved sessions yet.")
+                return
+            current = self._session.session_id if self._session else None
+            for i, s in enumerate(self._session_list, 1):
+                marker = "*" if s["id"] == current else " "
+                preview = s.get("preview", "") or "(no messages)"
+                if len(preview) > 48:
+                    preview = preview[:47] + "\u2026"
+                panel.add_system(
+                    f"{marker}{i}. {s['id']}  ({s['count']} msgs)  {preview}"
+                )
+            panel.add_system("Use /sessions load <n> or /sessions load <id>.")
+        elif sub == "load":
+            if len(args) < 2:
+                panel.add_system("Usage: /sessions load <n>|<id>")
+                return
+            self._load_session(args[1])
+        else:
+            panel.add_system(f"Unknown subcommand: /sessions {sub}")
+
+    def _load_session(self, ref: str) -> None:
+        """Load a saved session by 1-based list index or by id and resume it."""
+        panel = self._panel
+        if panel is None:
+            return
+        session_id = ref
+        if ref.isdigit():
+            idx = int(ref)
+            if not (1 <= idx <= len(self._session_list)):
+                panel.add_system(
+                    f"No session #{idx}. Run /sessions list first."
+                )
+                return
+            session_id = self._session_list[idx - 1]["id"]
+        try:
+            data = load_session(session_id)
+        except (OSError, ValueError):
+            panel.add_system(f"Could not load session: {session_id}")
+            return
+        messages = [tuple(m) for m in data.get("messages", [])]
+        self._llm_history = list(data.get("llm_history", []))
+        self._panel_messages = messages
+        panel.restore(messages)
+        # Continue writing into the loaded session's file from now on.
+        self._session = SessionStore.open_existing(session_id)
+        panel.add_system(f"Loaded session {session_id} ({len(messages)} msgs).")
 
     def _start_ask(
         self, question: str, *, user_echo: str | None = None, info: str | None = None
@@ -855,6 +982,7 @@ class Relai:
             return
         panel.thinking = False
         panel.add_reply(self._ask_result)
+        self._persist_session()
         self._render_split()
 
     def _ask_llm(self, question: str) -> str:
