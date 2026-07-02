@@ -683,12 +683,53 @@ class Relai:
                     "required": ["text"],
                 },
             ),
+            ToolSpec(
+                name="capture_screen_history",
+                description=(
+                    "Read lines from the terminal's scrollback history -- output "
+                    "that has scrolled above the currently visible screen. Use "
+                    "this when a command's output (for example the result of an "
+                    "inject_input call) is longer than what fits on the visible "
+                    "screen and you need to see the earlier lines. The history is "
+                    "the full logical output: everything that scrolled off the "
+                    "top, followed by the current viewport. 'offset' is a number "
+                    "of lines measured from the current position (the latest "
+                    "line) and must be NEGATIVE to look upward -- e.g. "
+                    "offset=-100 starts 100 lines above the current position. "
+                    "'length' is how many lines to return starting at that "
+                    "offset. If the range extends past the top it is clamped, and "
+                    "the result reports how many lines exist in total so you can "
+                    "adjust the offset and try again."
+                ),
+                input_schema={
+                    "type": "object",
+                    "properties": {
+                        "offset": {
+                            "type": "integer",
+                            "description": (
+                                "Lines from the current position to start at. "
+                                "Negative goes back into history, e.g. -100 = "
+                                "100 lines above the current position."
+                            ),
+                        },
+                        "length": {
+                            "type": "integer",
+                            "description": (
+                                "How many lines to return, starting at 'offset'."
+                            ),
+                        },
+                    },
+                    "required": ["offset", "length"],
+                },
+            ),
         ]
 
     def _run_tool(self, call: "ToolCall") -> str:
         """Execute a model-requested tool and return its result text."""
         if call.name == "inject_input":
             return self._tool_inject_input(call.input)
+        if call.name == "capture_screen_history":
+            return self._tool_capture_screen_history(call.input)
         return f"[relai] unknown tool: {call.name}"
 
     def _tool_inject_input(self, args: dict) -> str:
@@ -781,6 +822,62 @@ class Relai:
             return True  # never hang the tool on a status-check failure
         verdict = reply.strip().upper()
         return "RUNNING" not in verdict
+
+    def _tool_capture_screen_history(self, args: dict) -> str:
+        """Return a slice of the scrollback history for the model.
+
+        The history is the full logical output (everything that scrolled off
+        the top, followed by the current viewport). ``offset`` is a line count
+        from the current position (the end of the buffer) and is expected to be
+        negative to look upward; ``length`` is how many lines to return.
+        """
+        try:
+            offset = int(args.get("offset"))
+            length = int(args.get("length"))
+        except (TypeError, ValueError):
+            return (
+                "[relai] capture_screen_history: 'offset' and 'length' must be "
+                "integers."
+            )
+        if length <= 0:
+            return (
+                "[relai] capture_screen_history: 'length' must be a positive "
+                "integer."
+            )
+        # Read the full logical history; retry briefly in case the main thread
+        # is mutating the screen model concurrently.
+        full: list[str] | None = None
+        for _ in range(3):
+            try:
+                full = self.screen.full_text(include_scrollback=True)
+                break
+            except Exception:
+                time.sleep(0.02)
+        if full is None:
+            return (
+                "[relai] capture_screen_history: could not read the screen "
+                "history, please try again."
+            )
+        total = len(full)
+        start = max(0, min(total + offset, total))
+        end = max(start, min(total, start + length))
+        lines = full[start:end]
+        if not lines:
+            return (
+                "[relai] capture_screen_history: the requested range is empty "
+                f"(offset={offset}, length={length}). The history currently has "
+                f"{total} line(s); use a negative offset no smaller than "
+                f"-{total}."
+            )
+        body = "\n".join(lines)
+        return (
+            f"Screen history: {len(lines)} line(s) starting {total - start} "
+            f"line(s) above the current position ({total} line(s) available in "
+            "total):\n"
+            "<screenHistory>\n"
+            f"{body}\n"
+            "</screenHistory>"
+        )
 
     def _read(self, fd: int) -> bytes | None:
         """Read from ``fd``. Return ``None`` on EOF/child-gone, else bytes."""
