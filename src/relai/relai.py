@@ -93,11 +93,8 @@ class Relai:
     #: How many bytes to read from a fd at a time.
     READ_SIZE = 65536
 
-    #: Safety cap on the number of tool-call rounds within a single ask.
-    MAX_TOOL_ROUNDS = 8
-
     #: How often (seconds) to re-check whether injected input has settled.
-    INJECT_SETTLE_INTERVAL = 0.5
+    INJECT_SETTLE_INTERVAL = 0.25
 
     #: Max number of settle checks before giving up and returning the screen.
     INJECT_SETTLE_POLLS = 20
@@ -598,7 +595,7 @@ class Relai:
         checkpoint = len(self._llm_history)
         self._llm_history.append({"role": "user", "content": user_content})
         try:
-            for _ in range(self.MAX_TOOL_ROUNDS):
+            while True:
                 turn = self.llm.converse([system, *self._llm_history], tools=tools)
                 self._llm_history.append(turn.assistant_message)
                 if not turn.tool_calls:
@@ -612,8 +609,6 @@ class Relai:
                     )
                 if self._panel is not None:
                     self._panel.activity = "Thinking"
-            # Ran out of tool rounds; return whatever text we have.
-            return turn.text or "[relai] stopped after too many tool calls."
         except Exception:
             del self._llm_history[checkpoint:]
             raise
@@ -639,7 +634,13 @@ class Relai:
             "something in the terminal, actually DO it by calling the relevant "
             "tool rather than only describing the command. The result appears on "
             "the terminal screen and in your next screen snapshot, which you can "
-            "then describe."
+            "then describe.\n\n"
+            "Carry out your tasks inside whatever application is currently running "
+            "in the foreground, working within it whenever possible. If you judge "
+            "that a better solution requires leaving or exiting that application "
+            "(for example quitting the current program to run something else), do "
+            "NOT exit on your own -- first explain the better approach and confirm "
+            "with the user, and only exit the application once they agree."
         )
 
     def _llm_tools(self) -> list[ToolSpec]:
