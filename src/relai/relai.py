@@ -53,6 +53,14 @@ DEFAULT_PREFIX = b"\x07"  # Ctrl-G
 # To send a literal Ctrl-O to the child, use ``<prefix> o``.
 DEFAULT_SUMMON = b"\x0f"  # Ctrl-O
 
+# Bracketed paste: while the AI panel is open we enable it so the terminal wraps
+# pasted text (incl. mouse/middle-click paste) in these markers. That lets us
+# insert a paste verbatim without its embedded newlines submitting the prompt.
+_PASTE_ON = b"\x1b[?2004h"
+_PASTE_OFF = b"\x1b[?2004l"
+_PASTE_START = b"\x1b[200~"
+_PASTE_END = b"\x1b[201~"
+
 
 def _get_winsize(fd: int) -> tuple[int, int]:
     """Return (rows, cols) for the terminal on ``fd``.
@@ -142,8 +150,14 @@ class Relai:
         self._panel: AiPanel | None = None
         self._panel_closing = False
         self._panel_messages: list[tuple[str, str]] = []
+        # Bracketed-paste accumulator for the panel input (paste bursts may span
+        # several stdin reads and can embed newlines).
+        self._panel_pasting = False
+        self._panel_pastebuf = bytearray()
         self._compositor: Compositor | None = None
         self._panel_height = 10
+        # Height to restore when PageDown undoes a PageUp "half screen" resize.
+        self._panel_height_prev = 10
         self._phys_rows = 0
         self._phys_cols = 0
         self._ai_ask = None
@@ -386,10 +400,14 @@ class Relai:
         self._panel = AiPanel(cols, height, provider)
         self._panel.restore(self._panel_messages)
         self._panel_closing = False
+        self._panel_pasting = False
+        self._panel_pastebuf = bytearray()
 
         self._apply_split_size()
         self._compositor = Compositor(rows, cols)
-        self._write_all(self._stdout_fd, b"\x1b[?25h" + self._compositor.clear())
+        self._write_all(
+            self._stdout_fd, b"\x1b[?25h" + _PASTE_ON + self._compositor.clear()
+        )
         self._render_split()
         try:
             self._split_loop()
@@ -451,7 +469,26 @@ class Relai:
 
     def _resize_panel(self, delta: int) -> None:
         """Grow (delta>0) or shrink (delta<0) the panel by ``delta`` rows."""
-        height = max(3, min(self._panel_height + delta, self._phys_rows - 2))
+        self._set_panel_height(self._panel_height + delta)
+
+    def _panel_half(self) -> None:
+        """Resize the panel to half the overall screen height (PageUp).
+
+        Remembers the current height first so PageDown can restore it. A second
+        PageUp while already at half is a no-op.
+        """
+        half = max(3, self._phys_rows // 2)
+        if self._panel_height != half:
+            self._panel_height_prev = self._panel_height
+            self._set_panel_height(half)
+
+    def _panel_restore_height(self) -> None:
+        """Restore the height remembered before the last PageUp (PageDown)."""
+        self._set_panel_height(self._panel_height_prev)
+
+    def _set_panel_height(self, height: int) -> None:
+        """Set the panel height (clamped) and repaint the split."""
+        height = max(3, min(height, self._phys_rows - 2))
         if height == self._panel_height:
             return
         self._panel_height = height
@@ -486,9 +523,11 @@ class Relai:
         _set_winsize(self._master_fd, rows, cols)
         self._compositor = None
         self._panel = None
+        self._panel_pasting = False
+        self._panel_pastebuf = bytearray()
         # Repaint the full-size app from the model; the child's own SIGWINCH
         # redraw will then flow in via passthrough and stay consistent.
-        out = bytearray(b"\x1b[?25h\x1b[2J")
+        out = bytearray(_PASTE_OFF + b"\x1b[?25h\x1b[2J")
         for y in range(rows):
             out += b"\x1b[%d;1H" % (y + 1) + render_row(self.screen, y, cols)
         out += b"\x1b[%d;%dH" % (self.screen.cursor.y + 1, self.screen.cursor.x + 1)
@@ -497,7 +536,50 @@ class Relai:
     # -- panel input ---------------------------------------------------------
 
     def _panel_input(self, data: bytes) -> None:
-        """Route a stdin read to the panel (editing, scrolling, commands)."""
+        """Route a stdin read to the panel, extracting bracketed pastes first."""
+        if self._panel_pasting:
+            self._panel_pastebuf += data
+            self._drain_paste()
+            return
+        start = data.find(_PASTE_START)
+        if start != -1:
+            before = data[:start]
+            if before:
+                self._panel_dispatch(before)
+            self._panel_pasting = True
+            self._panel_pastebuf = bytearray(data[start + len(_PASTE_START) :])
+            self._drain_paste()
+            return
+        self._panel_dispatch(data)
+
+    def _drain_paste(self) -> None:
+        """Consume the paste buffer up to the end marker, if it has arrived."""
+        end = self._panel_pastebuf.find(_PASTE_END)
+        if end == -1:
+            return  # marker not here yet; keep accumulating across reads
+        pasted = bytes(self._panel_pastebuf[:end])
+        rest = bytes(self._panel_pastebuf[end + len(_PASTE_END) :])
+        self._panel_pasting = False
+        self._panel_pastebuf = bytearray()
+        self._apply_paste(pasted)
+        if rest:
+            self._panel_input(rest)
+
+    def _apply_paste(self, pasted: bytes) -> None:
+        """Insert pasted bytes into the single-line input as plain text."""
+        panel = self._panel
+        if panel is None:
+            return
+        text = pasted.decode("utf-8", "replace")
+        # The input is one line: fold newlines/tabs/controls to spaces so the
+        # paste never submits or breaks the layout.
+        cleaned = "".join(ch if ch >= " " else " " for ch in text)
+        if cleaned:
+            panel.editor.insert(cleaned)
+            panel.scroll = 0
+
+    def _panel_dispatch(self, data: bytes) -> None:
+        """Route a non-paste stdin read (commands, summon/prefix, keys)."""
         if self._awaiting_command:
             self._awaiting_command = False
             self._panel_command(data)
@@ -521,24 +603,54 @@ class Relai:
             self._resize_panel(1)
         elif key in (b"\x1b[B", b"\x1bOB"):  # Down -> shrink panel
             self._resize_panel(-1)
+        elif key == b"\x1b[5~":  # PageUp -> half the screen height
+            self._panel_half()
+        elif key == b"\x1b[6~":  # PageDown -> restore previous height
+            self._panel_restore_height()
 
     def _panel_key(self, key: bytes) -> None:
         """Handle a normal keystroke while the panel is focused."""
         panel = self._panel
+        editor = panel.editor
         if key in (b"\r", b"\n"):
             self._panel_submit()
-        elif key in (b"\x7f", b"\x08"):
-            panel.backspace()
+        elif key in (b"\x7f", b"\x08"):  # Backspace
+            editor.backspace()
+            panel.scroll = 0
         elif key == b"\x1b":  # bare Esc closes
             self._panel_closing = True
-        elif key in (b"\x1b[A", b"\x1bOA"):
+        elif key in (b"\x1b[C", b"\x1bOC"):  # Right
+            editor.right()
+        elif key in (b"\x1b[D", b"\x1bOD"):  # Left
+            editor.left()
+        elif key in (b"\x1b[A", b"\x1bOA"):  # Up -> scroll transcript
             panel.scroll_up(1)
-        elif key in (b"\x1b[B", b"\x1bOB"):
+        elif key in (b"\x1b[B", b"\x1bOB"):  # Down -> scroll transcript
             panel.scroll_down(1)
+        elif key in (b"\x1b[H", b"\x1bOH", b"\x1b[1~", b"\x1b[7~"):  # Home
+            editor.home()
+        elif key in (b"\x1b[F", b"\x1bOF", b"\x1b[4~", b"\x1b[8~"):  # End
+            editor.end()
+        elif key == b"\x1b[3~":  # Delete (forward)
+            editor.delete()
+            panel.scroll = 0
         elif key == b"\x1b[5~":  # PageUp
             panel.scroll_up(max(1, panel.height - 2))
         elif key == b"\x1b[6~":  # PageDown
             panel.scroll_down(max(1, panel.height - 2))
+        elif key == b"\x01":  # Ctrl-A -> line start
+            editor.home()
+        elif key == b"\x05":  # Ctrl-E -> line end
+            editor.end()
+        elif key == b"\x15":  # Ctrl-U -> kill to start
+            editor.kill_to_start()
+            panel.scroll = 0
+        elif key == b"\x0b":  # Ctrl-K -> kill to end
+            editor.kill_to_end()
+            panel.scroll = 0
+        elif key == b"\x17":  # Ctrl-W -> delete word back
+            editor.delete_word_back()
+            panel.scroll = 0
         elif key[:1] == b"\x1b":
             return  # ignore other escape sequences
         else:
@@ -548,7 +660,8 @@ class Relai:
                 return
             text = "".join(ch for ch in text if ch >= " ")
             if text:
-                panel.type_text(text)
+                editor.insert(text)
+                panel.scroll = 0
 
     def _panel_submit(self) -> None:
         """Send the typed question to the LLM on a background thread.

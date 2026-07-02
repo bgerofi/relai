@@ -9,6 +9,7 @@ screen model.
 
 from __future__ import annotations
 
+from .lineedit import LineEditor
 from .overlay import _wrap
 
 _RESET = b"\x1b[0m"
@@ -30,7 +31,7 @@ class AiPanel:
         self.cols = max(1, cols)
         self.height = height
         self.provider = provider
-        self.input = ""
+        self.editor = LineEditor()
         self.thinking = False
         # The verb shown by the animated indicator while ``thinking`` is True.
         # Defaults to "Thinking"; set to e.g. "Calling inject_input" during a
@@ -67,16 +68,14 @@ class AiPanel:
         self.scroll = 0
 
     def type_text(self, text: str) -> None:
-        self.input += text
+        self.editor.insert(text)
         self.scroll = 0
 
     def backspace(self) -> None:
-        self.input = self.input[:-1]
+        self.editor.backspace()
 
     def take_input(self) -> str:
-        question = self.input.strip()
-        self.input = ""
-        return question
+        return self.editor.take()
 
     def scroll_up(self, n: int) -> None:
         self.scroll += n
@@ -86,15 +85,28 @@ class AiPanel:
 
     # -- rendering -----------------------------------------------------------
 
-    def _shown_input(self) -> str:
-        avail = self.cols - len(_PROMPT)
-        if avail > 0 and len(self.input) > avail:
-            return self.input[-avail:]
-        return self.input
+    def _input_view(self) -> tuple[str, int]:
+        """Return the visible slice of the input and the 1-based cursor column.
+
+        The input is a single line that scrolls horizontally so the cursor is
+        always visible even when the text is wider than the panel.
+        """
+        avail = max(1, self.cols - len(_PROMPT))
+        text = self.editor.text
+        cur = self.editor.cursor
+        if len(text) <= avail:
+            start = 0
+        else:
+            start = max(0, min(cur - avail + 1, len(text) - avail))
+            if cur < start:
+                start = cur
+        visible = text[start : start + avail]
+        col = min(self.cols, len(_PROMPT) + (cur - start) + 1)
+        return visible, col
 
     def cursor_col(self) -> int:
         """1-based column of the input cursor on the panel's input row."""
-        return min(self.cols, len(_PROMPT) + len(self._shown_input()) + 1)
+        return self._input_view()[1]
 
     def _content_lines(self) -> list[bytes]:
         lines: list[bytes] = []
@@ -133,14 +145,15 @@ class AiPanel:
         label = f" relai · {self.provider} " if self.provider else " relai "
         if self.thinking:
             label += f"· {self.activity} "
-        hints = "^O/Esc:close  ^G Up/Dn:resize  PgUp/Dn:scroll "
+        hints = "^O/Esc:close  ^G Up/Dn/PgUp/Dn:resize  PgUp/Dn:scroll "
         if more_above > 0:
             hints = f"\u2191{more_above} more  " + hints
         text = (label + "· " + hints)[: self.cols].ljust(self.cols)
         return _REVERSE + text.encode("utf-8", "replace") + _RESET + _EOL
 
     def _input_line(self) -> bytes:
-        return _CYAN + _PROMPT.encode("ascii") + _RESET + self._shown_input().encode(
+        visible = self._input_view()[0]
+        return _CYAN + _PROMPT.encode("ascii") + _RESET + visible.encode(
             "utf-8", "replace"
         ) + _EOL
 
