@@ -119,6 +119,10 @@ class Relai:
         self._phys_rows = 0
         self._phys_cols = 0
         self._ai_ask = None
+        # Full running conversation sent to the LLM. Each user turn embeds the
+        # terminal screen snapshot taken at ask time (the panel transcript only
+        # keeps the visible question/answer text, so this is a separate buffer).
+        self._llm_history: list[dict] = []
         # Background LLM request while the panel spinner animates.
         self._ask_thread: threading.Thread | None = None
         self._ask_result = ""
@@ -553,23 +557,42 @@ class Relai:
         self._render_split()
 
     def _ask_llm(self, question: str) -> str:
-        """Send the current screen plus the user's question to the LLM."""
+        """Ask the LLM, maintaining the full multi-turn conversation.
+
+        The panel transcript only shows the visible question/answer text, so the
+        model-facing history is kept in a separate buffer. Every user turn embeds
+        the terminal screen snapshot captured at ask time, and each answer is
+        appended, so the model sees the entire prior conversation and every
+        screen it was shown.
+        """
         screen_text = self.snapshot_text()
-        messages = [
-            {
-                "role": "system",
-                "content": (
-                    "You are relai, an assistant embedded in a terminal. The user "
-                    "is looking at the terminal screen shown below. Answer their "
-                    "question about it concisely and helpfully.\n\n"
-                    "--- BEGIN TERMINAL SCREEN ---\n"
-                    f"{screen_text}\n"
-                    "--- END TERMINAL SCREEN ---"
-                ),
-            },
-            {"role": "user", "content": question},
-        ]
-        return self.llm.complete(messages)
+        user_content = (
+            "<screenContext>\n"
+            f"{screen_text}\n"
+            "</screenContext>\n"
+            f"<userRequest>\n{question}\n</userRequest>"
+        )
+        system = {
+            "role": "system",
+            "content": (
+                "You are relai, an assistant embedded in a terminal. The user "
+                "can ask you questions across multiple turns. Each user message "
+                "contains a <screenContext> block with a snapshot of what is "
+                "currently on the terminal (the screen may change between turns) "
+                "followed by the actual question in a <userRequest> block. Use "
+                "the conversation history and the latest screen to answer "
+                "concisely and helpfully."
+            ),
+        }
+        self._llm_history.append({"role": "user", "content": user_content})
+        try:
+            reply = self.llm.complete([system, *self._llm_history])
+        except Exception:
+            # Drop the unanswered turn so the history stays well-formed.
+            self._llm_history.pop()
+            raise
+        self._llm_history.append({"role": "assistant", "content": reply})
+        return reply
 
     def _read(self, fd: int) -> bytes | None:
         """Read from ``fd``. Return ``None`` on EOF/child-gone, else bytes."""
