@@ -2,6 +2,9 @@
 .venv/
 uv.lock
 
+# Project-local uv, bootstrapped by setup.sh when uv is not already installed
+.uv/
+
 # Python
 __pycache__/
 *.py[cod]
