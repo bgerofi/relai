@@ -21,6 +21,7 @@ import struct
 import sys
 import termios
 import threading
+import time
 import tty
 from typing import TYPE_CHECKING, Sequence
 
@@ -30,9 +31,10 @@ from .overlay import ScrollbackViewer
 from .panel import AiPanel
 from .render import Compositor, render_row
 from .screen import RelaiScreen
+from .llm import ToolSpec
 
 if TYPE_CHECKING:
-    from .llm import LLMClient
+    from .llm import LLMClient, ToolCall
 
 # relai commands are entered with a prefix key (like screen/tmux) followed by a
 # command letter. A single-byte control character is used as the prefix so no
@@ -90,6 +92,15 @@ class Relai:
 
     #: How many bytes to read from a fd at a time.
     READ_SIZE = 65536
+
+    #: Safety cap on the number of tool-call rounds within a single ask.
+    MAX_TOOL_ROUNDS = 8
+
+    #: How often (seconds) to re-check whether injected input has settled.
+    INJECT_SETTLE_INTERVAL = 0.5
+
+    #: Max number of settle checks before giving up and returning the screen.
+    INJECT_SETTLE_POLLS = 20
 
     def __init__(
         self,
@@ -527,6 +538,7 @@ class Relai:
             return
         panel.add_user(question)
         panel.thinking = True
+        panel.activity = "Thinking"
         panel.tick = 0
         self._render_split()  # show the question and the spinner immediately
 
@@ -564,6 +576,12 @@ class Relai:
         the terminal screen snapshot captured at ask time, and each answer is
         appended, so the model sees the entire prior conversation and every
         screen it was shown.
+
+        The model may also request tool calls (see :meth:`_llm_tools`). relai runs
+        an agent loop: it executes each requested tool, appends a tool_result to
+        the history, and asks again -- exactly the assistant/tool_use ->
+        tool_result -> assistant round-tripping a tool-using client performs --
+        until the model returns a plain text answer.
         """
         screen_text = self.snapshot_text()
         user_content = (
@@ -572,27 +590,197 @@ class Relai:
             "</screenContext>\n"
             f"<userRequest>\n{question}\n</userRequest>"
         )
+        system = {"role": "system", "content": self._llm_system_prompt()}
+        tools = self._llm_tools()
+
+        # Remember where this turn starts so a mid-flight failure can be rolled
+        # back cleanly, leaving the history well-formed (no dangling tool_use).
+        checkpoint = len(self._llm_history)
+        self._llm_history.append({"role": "user", "content": user_content})
+        try:
+            for _ in range(self.MAX_TOOL_ROUNDS):
+                turn = self.llm.converse([system, *self._llm_history], tools=tools)
+                self._llm_history.append(turn.assistant_message)
+                if not turn.tool_calls:
+                    return turn.text
+                for call in turn.tool_calls:
+                    if self._panel is not None:
+                        self._panel.activity = f"Calling {call.name}"
+                    output = self._run_tool(call)
+                    self._llm_history.append(
+                        self.llm.tool_result_message(call.id, output)
+                    )
+                if self._panel is not None:
+                    self._panel.activity = "Thinking"
+            # Ran out of tool rounds; return whatever text we have.
+            return turn.text or "[relai] stopped after too many tool calls."
+        except Exception:
+            del self._llm_history[checkpoint:]
+            raise
+
+    def _llm_system_prompt(self) -> str:
+        tool_lines = "\n".join(
+            f"  - {t.name}: {t.description}" for t in self._llm_tools()
+        )
+        return (
+            "You are relai, an assistant embedded in a terminal. The user can ask "
+            "you questions across multiple turns. Each user message contains a "
+            "<screenContext> block with a snapshot of what is currently on the "
+            "terminal (the screen may change between turns) followed by the actual "
+            "question in a <userRequest> block. Use the conversation history and "
+            "the latest screen to answer concisely and helpfully.\n\n"
+            "You can ACT in the user's terminal using the tools available to you "
+            "(invoke them through the normal tool/function-calling mechanism):\n"
+            f"{tool_lines}\n\n"
+            "These tools are really available to you right now. If the user asks "
+            "what tools or actions you can invoke, answer using this exact list -- "
+            "never claim you have no tools or that you don't know your tools. When "
+            "the user asks you to run, execute, display, open, show, list, or type "
+            "something in the terminal, actually DO it by calling the relevant "
+            "tool rather than only describing the command. The result appears on "
+            "the terminal screen and in your next screen snapshot, which you can "
+            "then describe."
+        )
+
+    def _llm_tools(self) -> list[ToolSpec]:
+        """Tools advertised to the model for this session."""
+        return [
+            ToolSpec(
+                name="inject_input",
+                description=(
+                    "Type characters into the user's terminal, exactly as if the "
+                    "user pressed the keys on their keyboard. The characters go to "
+                    "whatever program is currently in the foreground. Use it to "
+                    "(1) run a shell command on the user's behalf -- e.g. list or "
+                    "display files with 'ls' / 'cat', check status, install "
+                    "packages, etc. (set submit=true to press Enter and execute); "
+                    "or (2) send keystrokes (including control characters) to an "
+                    "interactive program such as vim, less, a REPL or a TUI. This "
+                    "is the way to actually DO things in the terminal; prefer it "
+                    "over merely telling the user what to type."
+                ),
+                input_schema={
+                    "type": "object",
+                    "properties": {
+                        "text": {
+                            "type": "string",
+                            "description": (
+                                "The exact characters to type. For a shell "
+                                "command this is the command line, e.g. 'ls -la'. "
+                                "May include control characters such as \\x03 "
+                                "(Ctrl-C) or \\t (Tab). A trailing newline, or "
+                                "submit=true, is needed to run a shell command."
+                            ),
+                        },
+                        "submit": {
+                            "type": "boolean",
+                            "description": (
+                                "If true, press Enter (send a carriage return) "
+                                "after the text to execute it. Defaults to false."
+                            ),
+                        },
+                    },
+                    "required": ["text"],
+                },
+            ),
+        ]
+
+    def _run_tool(self, call: "ToolCall") -> str:
+        """Execute a model-requested tool and return its result text."""
+        if call.name == "inject_input":
+            return self._tool_inject_input(call.input)
+        return f"[relai] unknown tool: {call.name}"
+
+    def _tool_inject_input(self, args: dict) -> str:
+        """Inject keystrokes into the child PTY (relai performs the tool call).
+
+        After injecting, the command's output is not available immediately and we
+        cannot know when it finishes. So relai polls the screen every
+        ``INJECT_SETTLE_INTERVAL`` seconds and, on each poll, makes a separate
+        out-of-band ``status check`` LLM call (NOT part of the conversation
+        history) asking whether the injected input still looks in progress. Once
+        it looks settled -- or a cap is hit -- the tool result returns the
+        up-to-date screen snapshot, so the main conversation continues with what
+        the injected input actually produced.
+        """
+        text = args.get("text", "")
+        if not isinstance(text, str):
+            return "[relai] inject_input: 'text' must be a string."
+        if args.get("submit"):
+            text += "\r"
+        data = text.encode("utf-8", "replace")
+        try:
+            self._write_all(self._master_fd, data)
+        except OSError as exc:
+            return f"[relai] inject_input failed: {exc}"
+        snapshot = self._wait_for_injection_to_settle(text)
+        return (
+            f"Injected {len(data)} byte(s) into the terminal. The input was sent "
+            "to the foreground program and its output has settled. This is the "
+            "terminal screen now:\n"
+            "<screenContext>\n"
+            f"{snapshot}\n"
+            "</screenContext>"
+        )
+
+    def _wait_for_injection_to_settle(self, injected: str) -> str:
+        """Poll the screen until the injected input looks finished.
+
+        The main split loop keeps feeding the PTY output into the screen model on
+        its own thread while this (worker-thread) method sleeps between polls, so
+        each snapshot reflects the latest output.
+        """
+        snapshot = self.snapshot_text()
+        for _ in range(self.INJECT_SETTLE_POLLS):
+            time.sleep(self.INJECT_SETTLE_INTERVAL)
+            try:
+                snapshot = self.snapshot_text()
+            except Exception:
+                continue  # transient read during a concurrent feed; retry
+            if self._injection_finished(injected, snapshot):
+                break
+        return snapshot
+
+    def _injection_finished(self, injected: str, screen_text: str) -> bool:
+        """Out-of-band status check: does the injected input look done?
+
+        This is a standalone LLM call that is deliberately NOT added to the
+        conversation history -- it only decides whether to keep waiting. On any
+        error (or no LLM) it reports finished so the tool never hangs.
+        """
+        if self.llm is None:
+            return True
         system = {
             "role": "system",
             "content": (
-                "You are relai, an assistant embedded in a terminal. The user "
-                "can ask you questions across multiple turns. Each user message "
-                "contains a <screenContext> block with a snapshot of what is "
-                "currently on the terminal (the screen may change between turns) "
-                "followed by the actual question in a <userRequest> block. Use "
-                "the conversation history and the latest screen to answer "
-                "concisely and helpfully."
+                "You monitor a terminal. Some keystrokes/command were just "
+                "injected into it. Given the injected input and the current "
+                "screen, decide whether that input has FINISHED taking effect "
+                "(output is complete and the terminal is idle / a shell prompt "
+                "is waiting for the next command) or is STILL RUNNING (output is "
+                "still being produced, a long-running command has not returned, "
+                "or the program is mid-operation). Reply with exactly one word: "
+                "DONE or RUNNING."
             ),
         }
-        self._llm_history.append({"role": "user", "content": user_content})
+        user = {
+            "role": "user",
+            "content": (
+                f"Injected input (repr): {injected!r}\n\n"
+                "Current terminal screen:\n"
+                "--- BEGIN SCREEN ---\n"
+                f"{screen_text}\n"
+                "--- END SCREEN ---\n\n"
+                "Has the injected input finished taking effect? Answer DONE or "
+                "RUNNING."
+            ),
+        }
         try:
-            reply = self.llm.complete([system, *self._llm_history])
+            reply = self.llm.complete([system, user], max_tokens=8)
         except Exception:
-            # Drop the unanswered turn so the history stays well-formed.
-            self._llm_history.pop()
-            raise
-        self._llm_history.append({"role": "assistant", "content": reply})
-        return reply
+            return True  # never hang the tool on a status-check failure
+        verdict = reply.strip().upper()
+        return "RUNNING" not in verdict
 
     def _read(self, fd: int) -> bytes | None:
         """Read from ``fd``. Return ``None`` on EOF/child-gone, else bytes."""

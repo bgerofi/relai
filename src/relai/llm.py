@@ -21,14 +21,48 @@ set; if several are configured, one is chosen by a fixed precedence
 from __future__ import annotations
 
 import os
-from dataclasses import dataclass
-from typing import Sequence
+from dataclasses import dataclass, field
+from typing import Any, Sequence
 
 #: How long (seconds) to wait on any single LLM request.
 DEFAULT_TIMEOUT = 30.0
 
-#: A chat message: {"role": "system"|"user"|"assistant", "content": str}.
-Message = dict[str, str]
+#: A chat message. ``content`` is usually a string, but for tool use it may be a
+#: list of provider-native content blocks (text / tool_use / tool_result).
+Message = dict[str, Any]
+
+
+@dataclass(frozen=True)
+class ToolSpec:
+    """A tool advertised to the model (name + JSON-schema for its input)."""
+
+    name: str
+    description: str
+    input_schema: dict
+
+
+@dataclass(frozen=True)
+class ToolCall:
+    """A single tool invocation the model requested."""
+
+    id: str
+    name: str
+    input: dict
+
+
+@dataclass
+class Turn:
+    """One assistant response, which may request tool calls.
+
+    ``assistant_message`` is the provider-native message to append back into the
+    conversation history verbatim, so a subsequent request replays the exact
+    tool_use blocks the model produced (mirroring how a client feeds an
+    assistant turn back to the model).
+    """
+
+    text: str
+    tool_calls: list[ToolCall] = field(default_factory=list)
+    assistant_message: Message = field(default_factory=dict)
 
 
 class LLMError(RuntimeError):
@@ -106,6 +140,25 @@ class LLMClient:
     def complete(self, messages: Sequence[Message], max_tokens: int = 1024) -> str:
         """Return the assistant's reply text for ``messages``."""
         raise NotImplementedError
+
+    def converse(
+        self,
+        messages: Sequence[Message],
+        tools: Sequence[ToolSpec] | None = None,
+        max_tokens: int = 1024,
+    ) -> Turn:
+        """One round-trip that may request tool calls.
+
+        The default implementation has no tool support: it just wraps
+        :meth:`complete` as a text-only turn. Providers that support tools
+        override this.
+        """
+        text = self.complete(messages, max_tokens=max_tokens)
+        return Turn(text=text, assistant_message={"role": "assistant", "content": text})
+
+    def tool_result_message(self, tool_call_id: str, content: str) -> Message:
+        """Build the message that reports a tool's output back to the model."""
+        return {"role": "user", "content": content}
 
     def verify(self) -> None:
         """Make a minimal request to confirm URL, key, and model all work.
@@ -195,6 +248,76 @@ class AnthropicClient(LLMClient):
             )
         except (AttributeError, TypeError) as exc:
             raise LLMError(f"unexpected response from {self.name}: {resp!r}") from exc
+
+    def converse(
+        self,
+        messages: Sequence[Message],
+        tools: Sequence[ToolSpec] | None = None,
+        max_tokens: int = 1024,
+    ) -> Turn:
+        system_parts = [m["content"] for m in messages if m.get("role") == "system"]
+        turns = [m for m in messages if m.get("role") != "system"]
+        kwargs: dict = {
+            "model": self.config.model,
+            "max_tokens": max_tokens,
+            "messages": turns,
+        }
+        if system_parts:
+            kwargs["system"] = "\n\n".join(system_parts)
+        if tools:
+            kwargs["tools"] = [
+                {
+                    "name": t.name,
+                    "description": t.description,
+                    "input_schema": t.input_schema,
+                }
+                for t in tools
+            ]
+        try:
+            resp = self._client.messages.create(**kwargs)
+        except Exception as exc:
+            raise LLMError(f"{self.name} request failed: {exc}") from exc
+        try:
+            text_parts: list[str] = []
+            blocks: list[dict] = []
+            tool_calls: list[ToolCall] = []
+            for block in resp.content:
+                if block.type == "text":
+                    text_parts.append(block.text)
+                    blocks.append({"type": "text", "text": block.text})
+                elif block.type == "tool_use":
+                    blocks.append(
+                        {
+                            "type": "tool_use",
+                            "id": block.id,
+                            "name": block.name,
+                            "input": block.input,
+                        }
+                    )
+                    tool_calls.append(
+                        ToolCall(
+                            id=block.id, name=block.name, input=dict(block.input)
+                        )
+                    )
+        except (AttributeError, TypeError) as exc:
+            raise LLMError(f"unexpected response from {self.name}: {resp!r}") from exc
+        return Turn(
+            text="".join(text_parts),
+            tool_calls=tool_calls,
+            assistant_message={"role": "assistant", "content": blocks},
+        )
+
+    def tool_result_message(self, tool_call_id: str, content: str) -> Message:
+        return {
+            "role": "user",
+            "content": [
+                {
+                    "type": "tool_result",
+                    "tool_use_id": tool_call_id,
+                    "content": content,
+                }
+            ],
+        }
 
 
 class GoogleClient(LLMClient):

@@ -75,3 +75,31 @@ export OPENAI_API_KEY=sk-...
 export OPENAI_MODEL=gpt-4o
 relai
 ```
+
+## Assistant tools
+
+Once an LLM provider is configured, the AI agent can act inside your terminal
+using a set of tools. The primary one is **`inject_input`**.
+
+### `inject_input`
+
+`inject_input` types characters into your terminal exactly as if you had pressed
+the keys yourself. Whatever program is currently in the foreground receives the
+input, which makes the tool useful in two ways:
+
+- **Run shell commands** on your behalf — e.g. `ls`, `cat`, checking status, or
+  installing packages. Submitting the input (pressing Enter) executes them.
+- **Send keystrokes to interactive programs** — control characters and TUI
+  navigation for editors, pagers, and REPLs (`vim`, `less`, a Python shell, etc.).
+
+Because relai operates at the PTY layer, injected input flows through the same
+byte stream as your own keystrokes, so it works with plain shells, full-screen
+ncurses apps, and nested remote sessions alike.
+
+| Field    | Description                                                        |
+|----------|--------------------------------------------------------------------|
+| `text`   | The exact characters to type (may include control characters).     |
+| `submit` | If `true`, press Enter after the text to execute it. Default `false`. |
+
+The result of the injected input appears on the terminal screen, which the agent
+can then read back and act on.

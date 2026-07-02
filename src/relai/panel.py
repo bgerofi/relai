@@ -32,6 +32,10 @@ class AiPanel:
         self.provider = provider
         self.input = ""
         self.thinking = False
+        # The verb shown by the animated indicator while ``thinking`` is True.
+        # Defaults to "Thinking"; set to e.g. "Calling inject_input" during a
+        # tool call so the user can see what the agent is doing.
+        self.activity = "Thinking"
         self.tick = 0  # advances while thinking, drives the spinner animation
         self.scroll = 0  # rows scrolled up from the bottom of the transcript
         self._messages: list[tuple[str, str]] = []
@@ -117,7 +121,9 @@ class AiPanel:
                         lines.append(seg.encode("utf-8", "replace") + _RESET + _EOL)
         if self.thinking:
             dots = _THINK_FRAMES[self.tick % len(_THINK_FRAMES)]
-            base = f"Thinking ({self.provider})" if self.provider else "Thinking"
+            base = self.activity
+            if self.provider and base == "Thinking":
+                base = f"Thinking ({self.provider})"
             label = f"{base}{dots}"
             for seg in _wrap(label, self.cols):
                 lines.append(_DIM + seg.encode("utf-8", "replace") + _RESET + _EOL)
@@ -126,7 +132,7 @@ class AiPanel:
     def _header(self, more_above: int) -> bytes:
         label = f" relai · {self.provider} " if self.provider else " relai "
         if self.thinking:
-            label += "· Thinking "
+            label += f"· {self.activity} "
         hints = "^G a:close  ^G Up/Dn:resize  PgUp/Dn:scroll "
         if more_above > 0:
             hints = f"\u2191{more_above} more  " + hints
