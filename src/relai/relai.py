@@ -1022,6 +1022,8 @@ class Relai:
                     max_tokens=self.REPLY_MAX_TOKENS,
                 )
                 self._llm_history.append(turn.assistant_message)
+                if self._panel is not None and turn.usage is not None:
+                    self._panel.context_pct = turn.usage.context_percent()
                 if not turn.tool_calls:
                     return turn.text
                 for call in turn.tool_calls:

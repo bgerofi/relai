@@ -40,6 +40,8 @@ class AiPanel:
         self.tick = 0  # advances while thinking, drives the spinner animation
         self.scroll = 0  # rows scrolled up from the bottom of the transcript
         self._messages: list[tuple[str, str]] = []
+        # Percent of the context window used by the last request (None = unknown).
+        self.context_pct: float | None = None
 
     # -- state mutation ------------------------------------------------------
 
@@ -94,13 +96,23 @@ class AiPanel:
 
     # -- rendering -----------------------------------------------------------
 
+    def _prompt_prefix(self) -> str:
+        """A dim badge shown before the prompt, e.g. "[45%] " for context use.
+
+        Empty string when the context usage is unknown.
+        """
+        if self.context_pct is None:
+            return ""
+        return f"[{self.context_pct:.0f}%] "
+
     def _input_view(self) -> tuple[str, int]:
         """Return the visible slice of the input and the 1-based cursor column.
 
         The input is a single line that scrolls horizontally so the cursor is
         always visible even when the text is wider than the panel.
         """
-        avail = max(1, self.cols - len(_PROMPT))
+        prefix_w = len(self._prompt_prefix())
+        avail = max(1, self.cols - len(_PROMPT) - prefix_w)
         text = self.editor.text
         cur = self.editor.cursor
         if len(text) <= avail:
@@ -110,7 +122,7 @@ class AiPanel:
             if cur < start:
                 start = cur
         visible = text[start : start + avail]
-        col = min(self.cols, len(_PROMPT) + (cur - start) + 1)
+        col = min(self.cols, prefix_w + len(_PROMPT) + (cur - start) + 1)
         return visible, col
 
     def cursor_col(self) -> int:
@@ -169,7 +181,11 @@ class AiPanel:
 
     def _input_line(self) -> bytes:
         visible = self._input_view()[0]
-        return _CYAN + _PROMPT.encode("ascii") + _RESET + visible.encode(
+        prefix = self._prompt_prefix()
+        badge = (
+            _DIM + prefix.encode("ascii") + _RESET if prefix else b""
+        )
+        return badge + _CYAN + _PROMPT.encode("ascii") + _RESET + visible.encode(
             "utf-8", "replace"
         ) + _EOL
 

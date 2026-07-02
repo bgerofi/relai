@@ -33,6 +33,83 @@ Message = dict[str, Any]
 
 
 @dataclass(frozen=True)
+class Usage:
+    """Token accounting for one LLM response, normalized across providers.
+
+    ``input_tokens`` / ``output_tokens`` are the prompt (context) and
+    completion token counts. ``total_tokens`` is the provider-reported total
+    when available, otherwise the sum. ``context_window`` is the model's
+    maximum context size (0 / unknown -> percent is None).
+    """
+
+    input_tokens: int = 0
+    output_tokens: int = 0
+    total_tokens: int = 0
+    context_window: int = 0
+
+    def context_percent(self) -> float | None:
+        """Fraction of the context window consumed by the prompt, as a percent.
+
+        Uses ``input_tokens`` (the prompt) against ``context_window``. Returns
+        ``None`` when the window size is unknown (0). Result is clamped to
+        [0, 100].
+        """
+        if self.context_window <= 0:
+            return None
+        pct = 100.0 * self.input_tokens / self.context_window
+        return max(0.0, min(100.0, pct))
+
+
+def _get(obj: Any, *names: str) -> int:
+    """Fetch the first present attribute/key in ``names`` as an int (else 0)."""
+    for name in names:
+        val = None
+        if isinstance(obj, dict):
+            val = obj.get(name)
+        else:
+            val = getattr(obj, name, None)
+        if val is not None:
+            try:
+                return int(val)
+            except (TypeError, ValueError):
+                continue
+    return 0
+
+
+def usage_from_response(resp: Any, context_window: int = 0) -> Usage | None:
+    """Extract a :class:`Usage` from any provider's raw response object.
+
+    Handles OpenAI (``resp.usage.prompt_tokens`` / ``completion_tokens`` /
+    ``total_tokens``), Anthropic (``resp.usage.input_tokens`` /
+    ``output_tokens``), and Google (``resp.usage_metadata.prompt_token_count``
+    / ``candidates_token_count`` / ``total_token_count``). Returns ``None`` when
+    no usage block is present.
+    """
+    block = getattr(resp, "usage", None)
+    if block is None and isinstance(resp, dict):
+        block = resp.get("usage")
+    if block is None:
+        block = getattr(resp, "usage_metadata", None)
+        if block is None and isinstance(resp, dict):
+            block = resp.get("usage_metadata")
+    if block is None:
+        return None
+    inp = _get(block, "input_tokens", "prompt_tokens", "prompt_token_count")
+    out = _get(
+        block, "output_tokens", "completion_tokens", "candidates_token_count"
+    )
+    total = _get(block, "total_tokens", "total_token_count")
+    if total == 0:
+        total = inp + out
+    return Usage(
+        input_tokens=inp,
+        output_tokens=out,
+        total_tokens=total,
+        context_window=context_window,
+    )
+
+
+@dataclass(frozen=True)
 class ToolSpec:
     """A tool advertised to the model (name + JSON-schema for its input)."""
 
@@ -63,6 +140,7 @@ class Turn:
     text: str
     tool_calls: list[ToolCall] = field(default_factory=list)
     assistant_message: Message = field(default_factory=dict)
+    usage: Usage | None = None
 
 
 class LLMError(RuntimeError):
@@ -81,6 +159,8 @@ class ProviderConfig:
     api_url: str
     api_key: str
     model: str
+    # Model context window in tokens (0 = unknown; set via *_CONTEXT_WINDOW).
+    context_window: int = 0
 
 
 # Precedence when more than one provider is fully configured.
@@ -102,8 +182,17 @@ def _read_provider(name: str) -> ProviderConfig | None:
     key = os.environ.get(f"{prefix}_API_KEY")
     model = os.environ.get(f"{prefix}_MODEL")
     if url and key and model:
+        ctx_raw = os.environ.get(f"{prefix}_CONTEXT_WINDOW", "")
+        try:
+            ctx = int(ctx_raw)
+        except (TypeError, ValueError):
+            ctx = 0
         return ProviderConfig(
-            name=name, api_url=url.rstrip("/"), api_key=key, model=model
+            name=name,
+            api_url=url.rstrip("/"),
+            api_key=key,
+            model=model,
+            context_window=ctx,
         )
     return None
 
@@ -128,6 +217,8 @@ class LLMClient:
     def __init__(self, config: ProviderConfig, timeout: float = DEFAULT_TIMEOUT) -> None:
         self.config = config
         self.timeout = timeout
+        # Usage from the most recent request (set by complete/converse).
+        self._last_usage: Usage | None = None
 
     @property
     def name(self) -> str:
@@ -136,6 +227,10 @@ class LLMClient:
     @property
     def model(self) -> str:
         return self.config.model
+
+    @property
+    def context_window(self) -> int:
+        return self.config.context_window
 
     def complete(self, messages: Sequence[Message], max_tokens: int = 1024) -> str:
         """Return the assistant's reply text for ``messages``."""
@@ -154,7 +249,11 @@ class LLMClient:
         override this.
         """
         text = self.complete(messages, max_tokens=max_tokens)
-        return Turn(text=text, assistant_message={"role": "assistant", "content": text})
+        return Turn(
+            text=text,
+            assistant_message={"role": "assistant", "content": text},
+            usage=self._last_usage,
+        )
 
     def tool_result_message(self, tool_call_id: str, content: str) -> Message:
         """Build the message that reports a tool's output back to the model."""
@@ -199,6 +298,7 @@ class OpenAIClient(LLMClient):
             )
         except Exception as exc:  # SDK raises its own error hierarchy
             raise LLMError(f"{self.name} request failed: {exc}") from exc
+        self._last_usage = usage_from_response(resp, self.context_window)
         try:
             return resp.choices[0].message.content or ""
         except (AttributeError, IndexError, TypeError) as exc:
@@ -242,6 +342,7 @@ class AnthropicClient(LLMClient):
             resp = self._client.messages.create(**kwargs)
         except Exception as exc:
             raise LLMError(f"{self.name} request failed: {exc}") from exc
+        self._last_usage = usage_from_response(resp, self.context_window)
         try:
             return "".join(
                 block.text for block in resp.content if block.type == "text"
@@ -305,6 +406,7 @@ class AnthropicClient(LLMClient):
             text="".join(text_parts),
             tool_calls=tool_calls,
             assistant_message={"role": "assistant", "content": blocks},
+            usage=usage_from_response(resp, self.context_window),
         )
 
     def tool_result_message(self, tool_call_id: str, content: str) -> Message:
@@ -376,6 +478,7 @@ class GoogleClient(LLMClient):
             text = resp.text
         except (AttributeError, TypeError) as exc:
             raise LLMError(f"unexpected response from {self.name}: {resp!r}") from exc
+        self._last_usage = usage_from_response(resp, self.context_window)
         return text or ""
 
 
