@@ -1,21 +1,21 @@
 # RelAI
 
-**relai** is an AI agent that lives in your terminal. It sits transparently on the
+**relai** is an AI agent that sits transparently on the
 character stream between you and whatever program you run. The agent is always
-one keystroke away, no matter where and what you are running.
+one keystroke away, no matter where you are running.
 
-Because relai operates at the pseudo-terminal (PTY) layer rather than inside any
+Because **relai** operates at the pseudo-terminal (PTY) layer rather than inside any
 particular application, it integrates **seamlessly with any terminal and any
-program**: plain shells, full-screen ncurses apps (`htop`, `vim`, `less`), and
+program**: plain shells, full-screen TUI apps (`htop`, `vim`, `Claude code`), and
 REPLs all work unchanged. There is nothing to configure per-app; if it runs in a
 terminal, relai can drive it.
 
 relai is also **host transparent**. It processes the PTY byte stream, so it
-travels with you across `ssh` hops and nested `tmux`/`screen` sessions — the
+travels with you across `ssh` hops and nested `tmux`/`screen` sessions, the
 agent keeps working on the far side without any agent or API key installed on
 the remote host. Your session, wherever it goes, carries the agent along.
 
-The human is in control by default. relai just relays, until you summon the
+You are in control by default. relai just relays, until you summon the
 agent. Once you do, it can:
 
 - **Run commands** on your behalf (and read back their output).
@@ -23,12 +23,27 @@ agent. Once you do, it can:
   `vim`, page through `less`, drive a Python REPL, and so on.
 - **Focus on specific parts of the screen, including scrollback history**, so it
   can reason about exactly what you are looking at, not just the last line.
+- Through enhanced **helpers** you can also acomplish more complex tasks, such as
+  coding or debugging, issue resolution and triaging, etc.
+
+## What RelAI is not?
+
+- **Not an MCP service or a plugin for extending some other harness.** relai
+  does not exist to hand tools or context to a separate AI harness. It *is* the
+  agent, and it drives any harness by itself, at the PTY layer, sending real
+  keystrokes and reading the real screen. There is no host application it needs
+  to be embedded in and nothing to register on the far side.
+- **Not a terminal emulator with AI bolted on.** relai does not implement a
+  terminal, replace your shell, or ask you to adopt a new one. It runs *inside*
+  whatever terminal you already use (iTerm, Alacritty, Windows Terminal, a
+  `tmux`/`screen` pane, an SSH session) and relays the byte stream transparently.
+  Your terminal, keybindings, and workflow stay exactly as they were.
 
 ## Status
 
 Working prototype. Transparent passthrough, an on-demand AI panel (a resizable
-bottom split), the agentic tool-calling loop, and screen/scrollback inspection
-are all implemented.
+bottom split), the agentic tool-calling loop, screen/scrollback inspection, helpers,
+and conversation sessions are implemented.
 
 ## Setup
 
