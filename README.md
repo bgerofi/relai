@@ -28,15 +28,15 @@ agent. Once you do, it can:
 
 ## What RelAI is not?
 
-- **Not an MCP service or a plugin for extending some other harness.** relai
-  does not exist to hand tools or context to a separate AI harness. It *is* the
+- RelAI is **not an MCP service or a plugin** for extending other harnesses. 
+  It does not exist to hand tools or context to a separate AI harness. It *is* the
   agent, and it drives any harness by itself, at the PTY layer, sending real
   keystrokes and reading the real screen. There is no host application it needs
   to be embedded in and nothing to register on the far side.
-- **Not a terminal emulator with AI bolted on.** relai does not implement a
+- RelAI is **not a terminal emulator with AI bolted on**. It does not implement a
   terminal, replace your shell, or ask you to adopt a new one. It runs *inside*
-  whatever terminal you already use (iTerm, Alacritty, Windows Terminal, a
-  `tmux`/`screen` pane, an SSH session) and relays the byte stream transparently.
+  whatever terminal you already use (xterm, iTerm, Alacritty, ghostty, Windows Terminal,
+  a `tmux`/`screen` pane, etc.) and relays the byte stream transparently.
   Your terminal, keybindings, and workflow stay exactly as they were.
 
 ## Status
