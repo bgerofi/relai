@@ -156,7 +156,10 @@ def test_complete_slash():
     # command-name completion (unique -> trailing space)
     assert complete_slash("/sess") == "/sessions "
     assert complete_slash("/s") == "/sessions "
-    assert complete_slash("/") == "/sessions "
+    assert complete_slash("/i") == "/init_helpers "
+    assert complete_slash("/init") == "/init_helpers "
+    # ambiguous at the root ("init_helpers" vs "sessions" share no prefix) -> None
+    assert complete_slash("/") is None
     # already complete command name -> add trailing space
     assert complete_slash("/sessions") == "/sessions "
     # subcommand completion
@@ -164,6 +167,8 @@ def test_complete_slash():
     assert complete_slash("/sessions lo") == "/sessions load "
     # ambiguous subcommand prefix "l" -> common prefix is "l" (== word) -> None
     assert complete_slash("/sessions l") is None
+    # a command with no subcommands does not complete its argument
+    assert complete_slash("/init_helpers ") is None
     # no completion possible
     assert complete_slash("/xyz") is None
     assert complete_slash("/sessions bogus") is None

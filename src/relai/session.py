@@ -171,6 +171,7 @@ def load_session(
 # Registry of in-panel commands and their subcommands. Used both to dispatch and
 # to drive Tab completion. Keep the subcommand lists sorted for stable output.
 SLASH_COMMANDS: dict[str, list[str]] = {
+    "init_helpers": [],
     "sessions": ["list", "load"],
 }
 
