@@ -6,7 +6,7 @@ one keystroke away, no matter where you are running.
 
 Because **relai** operates at the pseudo-terminal (PTY) layer rather than inside any
 particular application, it integrates **seamlessly with any terminal and any
-program**: plain shells, full-screen TUI apps (`htop`, `vim`, `Claude code`), and
+program**: plain shells, full-screen TUI apps (`htop`, `vim`, `claude`), and
 REPLs all work unchanged. There is nothing to configure per-app; if it runs in a
 terminal, relai can drive it.
 
@@ -163,3 +163,47 @@ can go back and inspect earlier output rather than only the visible rows.
 Because the injected-input result and the screen history both come from relai's
 own `pyte` model of the terminal, the agent always sees exactly what you see —
 across plain shells, full-screen apps, and remote sessions alike.
+
+## Assistant helpers
+
+Tools are the agent's built-in, in-process primitives — `inject_input` and
+`capture_screen_history` — and they are the *only* channel through which the
+agent touches your machine. Everything the agent does ultimately flows through
+them. **Helpers** are a complementary mechanism that the agent builds *on top
+of* those tools.
+
+Because relai works purely at the PTY layer, the harness has no direct
+filesystem or exec access to the (possibly remote) box it is driving — it only
+sees the terminal. To work reliably at a higher level, the agent maintains a
+small, dependency-free helper program, `relai_helper`, under `~/.relai/bin/` on
+that machine. It is written on demand, persists across sessions, and is kept
+outside your repositories (in `~/.relai/`) so it never shows up in
+`git status`.
+
+The agent does not call helpers directly the way it calls a tool; it *runs*
+them by typing a shell command through `inject_input`. `relai_helper` exposes
+subcommands for the file operations that are awkward to do safely over a raw
+terminal — `read`, `write`, `append`, `replace`, `search`, and `run`. Every
+content payload is passed as base64 and every result is sentinel-framed with a
+real exit code, so edits are immune to quoting, newline, and escape corruption,
+and success is read from a reliable status rather than guessed from screen text.
+
+You can (re)create them at any time with the `/init_helpers` prefix command,
+which asks the agent to build and validate `~/.relai/bin/relai_helper` on the
+machine.
+
+### Tools vs. helpers
+
+| | Tools | Helpers |
+|---|-------|---------|
+| **What** | Built-in agent primitives | Scripts the agent generates for itself |
+| **Where they run** | Inside the relai process (Python) | On the target machine, under `~/.relai/bin/` |
+| **How invoked** | Called directly by the model | Run via `inject_input` (typed as shell commands) |
+| **Availability** | Always present | Optional; created on demand via `/init_helpers` |
+| **Lifetime** | Live for the process | Persist across sessions |
+| **Purpose** | The only way the agent acts at all | Make file read/edit/search reliable and corruption-proof |
+
+In short: tools are *how the agent acts*; helpers are something the agent
+builds with those tools to act more precisely. Helpers are a convenience, not a
+requirement — if they are missing, the agent can recreate them or fall back to
+plain shell commands.
