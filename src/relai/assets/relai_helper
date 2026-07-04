@@ -1,0 +1,168 @@
+#!/usr/bin/env python3
+import sys, os, base64, argparse, subprocess, re, fnmatch, difflib, py_compile
+
+VER = "0.2.1"
+CAPS = "read,write,append,replace,replace-range,search,run,info"
+
+def emit(op, payload_bytes=None, code=0, **meta):
+    sys.stdout.write("<<<RELAI:BEGIN op=%s>>>\n" % op)
+    if payload_bytes is not None:
+        sys.stdout.write(base64.b64encode(payload_bytes).decode() + "\n")
+    metastr = "".join(" %s=%s" % (k, v) for k, v in meta.items())
+    sys.stdout.write("<<<RELAI:END op=%s exit=%d%s>>>\n" % (op, code, metastr))
+    sys.stdout.flush()
+    return code
+
+def _backup(path):
+    try:
+        if os.path.isfile(path):
+            with open(path, "rb") as f:
+                data = f.read()
+            with open(path + ".relai.bak", "wb") as f:
+                f.write(data)
+    except (IOError, OSError):
+        pass
+
+def _pycheck(path):
+    if not path.endswith(".py"):
+        return None
+    try:
+        py_compile.compile(path, doraise=True)
+        return "ok"
+    except py_compile.PyCompileError:
+        return "FAILED"
+
+def _save(op, path, ndata, dry, **meta):
+    if dry:
+        try:
+            with open(path, "rb") as f:
+                old = f.read()
+        except (IOError, OSError):
+            old = b""
+        diff = "".join(difflib.unified_diff(
+            old.decode("utf-8", "replace").splitlines(keepends=True),
+            ndata.decode("utf-8", "replace").splitlines(keepends=True),
+            fromfile=path, tofile=path + " (new)"))
+        return emit(op, diff.encode(), 0, path=path, dry_run="1", **meta)
+    _backup(path)
+    with open(path, "wb") as f:
+        f.write(ndata)
+    pc = _pycheck(path)
+    code = 0
+    if pc is not None:
+        meta["pycheck"] = pc
+        if pc == "FAILED":
+            code = 4
+            meta["error"] = "py_syntax"
+            meta["backup"] = path + ".relai.bak"
+    return emit(op, None, code, path=path, **meta)
+
+def op_read(a):
+    with open(a.path, "rb") as f:
+        data = f.read()
+    lines = data.split(b"\n")
+    total = len(lines)
+    rng = "all"
+    if a.start is not None or a.end is not None:
+        s = (a.start or 1) - 1
+        e = a.end if a.end is not None else total
+        data = b"\n".join(lines[s:e])
+        rng = "%d-%d" % (s + 1, e)
+    return emit("read", data, 0, path=a.path, lines=total, range=rng)
+
+def op_write(a):
+    data = base64.b64decode(a.b64)
+    d = os.path.dirname(a.path)
+    if d:
+        os.makedirs(d, exist_ok=True)
+    return _save("write", a.path, data, a.dry_run, bytes=len(data))
+
+def op_append(a):
+    data = base64.b64decode(a.b64)
+    d = os.path.dirname(a.path)
+    if d:
+        os.makedirs(d, exist_ok=True)
+    with open(a.path, "ab") as f:
+        f.write(data)
+    return emit("append", None, 0, path=a.path, bytes=len(data))
+
+def op_replace(a):
+    old = base64.b64decode(a.old_b64)
+    new = base64.b64decode(a.new_b64)
+    with open(a.path, "rb") as f:
+        data = f.read()
+    found = data.count(old)
+    if found == 0:
+        return emit("replace", None, 2, path=a.path, error="old_not_found")
+    if a.expect_count is not None and found != a.expect_count:
+        return emit("replace", None, 3, path=a.path,
+                    error="count_mismatch", found=found, expected=a.expect_count)
+    cnt = -1 if a.count is None else a.count
+    ndata = data.replace(old, new, cnt) if cnt >= 0 else data.replace(old, new)
+    n = found if cnt < 0 else min(cnt, found)
+    return _save("replace", a.path, ndata, a.dry_run, replaced=n)
+
+def op_replace_range(a):
+    new = base64.b64decode(a.b64)
+    with open(a.path, "rb") as f:
+        lines = f.read().split(b"\n")
+    s = a.start - 1
+    e = a.end
+    ndata = b"\n".join(lines[:s] + new.split(b"\n") + lines[e:])
+    return _save("replace-range", a.path, ndata, a.dry_run, range="%d-%d" % (a.start, a.end))
+
+SKIP = {".git", "node_modules", "__pycache__"}
+
+def op_search(a):
+    rx = re.compile(a.pattern)
+    hits = []
+    root = a.path
+    files = []
+    if os.path.isfile(root):
+        files = [root]
+    else:
+        for dp, dns, fns in os.walk(root):
+            dns[:] = [d for d in dns if d not in SKIP]
+            for fn in fns:
+                if a.glob and not fnmatch.fnmatch(fn, a.glob):
+                    continue
+                files.append(os.path.join(dp, fn))
+    for fp in files:
+        try:
+            with open(fp, "r", errors="replace") as f:
+                for i, line in enumerate(f, 1):
+                    if rx.search(line):
+                        hits.append("%s:%d:%s" % (fp, i, line.rstrip("\n")))
+        except (IOError, OSError):
+            continue
+    payload = "\n".join(hits).encode()
+    return emit("search", payload, 0 if hits else 1, matches=len(hits))
+
+def op_run(a):
+    cmd = base64.b64decode(a.b64).decode()
+    p = subprocess.run(cmd, shell=True, capture_output=True)
+    out = p.stdout
+    if p.stderr:
+        out += b"\n[stderr]\n" + p.stderr
+    return emit("run", out, p.returncode)
+
+def op_info(a):
+    txt = "relai_helper %s\ncaps=%s\npython=%s" % (VER, CAPS, sys.version.split()[0])
+    return emit("info", txt.encode(), 0)
+
+def main():
+    p = argparse.ArgumentParser(prog="relai_helper")
+    sub = p.add_subparsers(dest="cmd", required=True)
+    r = sub.add_parser("read"); r.add_argument("path"); r.add_argument("--start", type=int); r.add_argument("--end", type=int); r.set_defaults(fn=op_read)
+    w = sub.add_parser("write"); w.add_argument("path"); w.add_argument("--b64", required=True); w.add_argument("--dry-run", action="store_true"); w.set_defaults(fn=op_write)
+    ap = sub.add_parser("append"); ap.add_argument("path"); ap.add_argument("--b64", required=True); ap.set_defaults(fn=op_append)
+    rp = sub.add_parser("replace"); rp.add_argument("path"); rp.add_argument("--old-b64", dest="old_b64", required=True); rp.add_argument("--new-b64", dest="new_b64", required=True); rp.add_argument("--count", type=int); rp.add_argument("--expect-count", dest="expect_count", type=int); rp.add_argument("--dry-run", action="store_true"); rp.set_defaults(fn=op_replace)
+    rr = sub.add_parser("replace-range"); rr.add_argument("path"); rr.add_argument("--start", type=int, required=True); rr.add_argument("--end", type=int, required=True); rr.add_argument("--b64", required=True); rr.add_argument("--dry-run", action="store_true"); rr.set_defaults(fn=op_replace_range)
+    s = sub.add_parser("search"); s.add_argument("pattern"); s.add_argument("--path", default="."); s.add_argument("--glob"); s.set_defaults(fn=op_search)
+    rn = sub.add_parser("run"); rn.add_argument("--b64", required=True); rn.set_defaults(fn=op_run)
+    inf = sub.add_parser("info"); inf.set_defaults(fn=op_info)
+    a = p.parse_args()
+    sys.exit(a.fn(a))
+
+if __name__ == "__main__":
+    main()

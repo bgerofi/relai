@@ -1,14 +1,18 @@
-"""Unit test: the /init_helpers panel command triggers helper initialization.
+"""Unit test: the /init_helpers panel command deterministically installs the helper.
 
-Also asserts the old first-open auto-initialization has been removed.
+/init_helpers no longer asks the LLM to generate the helper. Instead the harness
+injects a self-contained shell command (built from the embedded golden source)
+and reports the parsed result. Also asserts the old first-open
+auto-initialization has been removed.
 
 Run:
     cd /local_home/bgerofi1/src/relai && source .venv/bin/activate \
         && python tools/test_ai_init_helpers.py
 """
 
-from relai.relai import Relai, HELPERS_INIT_PROMPT
+from relai.relai import Relai
 from relai.panel import AiPanel
+from relai.helper_src import RELAI_HELPER_VERSION, helper_install_command
 
 
 def make_relai(with_llm: bool = True):
@@ -17,10 +21,19 @@ def make_relai(with_llm: bool = True):
     r._panel = AiPanel(cols=80, height=8, provider="test")
     r._phys_rows, r._phys_cols = 24, 80
     r._render_split = lambda: None
-    # Capture _start_ask instead of spawning a thread.
-    calls: list = []
-    r._start_ask = lambda q, **kw: calls.append((q, kw))
-    return r, calls
+    # Capture deterministic actions instead of spawning a thread; run the worker
+    # synchronously with stubbed injection so we can inspect the result.
+    actions: list = []
+
+    def fake_start_action(worker, **kw):
+        actions.append(kw)
+        r._panel.add_system(worker())
+
+    r._start_action = fake_start_action
+    # Also capture _start_ask to prove the LLM path is NOT used anymore.
+    asks: list = []
+    r._start_ask = lambda q, **kw: asks.append((q, kw))
+    return r, actions, asks
 
 
 def submit(r, text: str) -> None:
@@ -29,30 +42,67 @@ def submit(r, text: str) -> None:
     r._panel_key(b"\r")
 
 
-def test_init_helpers_command_starts_turn():
-    r, calls = make_relai(with_llm=True)
+def test_init_helpers_is_deterministic():
+    r, actions, asks = make_relai(with_llm=True)
+    # Stub the injection so the "screen" contains a realistic install result.
+    written: list = []
+    r._write_all = lambda fd, data: written.append(data)
+    r._current_prompt_prefix = lambda: "$ "
+    r._wait_for_injection_to_settle = (
+        lambda cmd, prefix: "$ ...\n"
+        f"RELAI_HELPER_INIT status=installed version={RELAI_HELPER_VERSION} "
+        "ok=1 reason=missing\n$ "
+    )
     submit(r, "/init_helpers")
-    assert len(calls) == 1, calls
-    question, kwargs = calls[0]
-    assert question == HELPERS_INIT_PROMPT
-    assert "info" in kwargs and kwargs["info"]
-    # The command echo is an ephemeral system line (not persisted, not a user turn).
-    kinds = [k for k, _ in r._panel.messages]
-    assert kinds and kinds[0] == "system", kinds
-    print("/init_helpers starts an agent turn: OK")
+
+    assert asks == [], "the LLM must NOT be involved in /init_helpers anymore"
+    assert len(actions) == 1, actions
+    # The injected bytes are the golden install command + Enter.
+    assert written and written[0].endswith(b"\r")
+    assert written[0][:-1].decode() == helper_install_command()
+    # The parsed status is shown as a system line.
+    msgs = [t for t in r._panel.messages]
+    assert msgs[0][0] == "system" and msgs[0][1] == "> /init_helpers"
+    assert any("installed" in t and RELAI_HELPER_VERSION in t
+               for k, t in msgs if k == "system"), msgs
+    print("/init_helpers is deterministic (no LLM): OK")
 
 
-def test_init_helpers_without_llm():
-    r, calls = make_relai(with_llm=False)
+def test_init_helpers_works_without_llm():
+    # No provider configured must NOT block a deterministic install.
+    r, actions, asks = make_relai(with_llm=False)
+    r._write_all = lambda fd, data: None
+    r._current_prompt_prefix = lambda: "$ "
+    r._wait_for_injection_to_settle = (
+        lambda cmd, prefix: f"RELAI_HELPER_INIT status=current "
+        f"version={RELAI_HELPER_VERSION} ok=1 reason=match"
+    )
     submit(r, "/init_helpers")
-    assert calls == [], "no agent turn should start without an LLM"
-    last = r._panel.messages[-1]
-    assert last[0] == "system" and "No LLM provider" in last[1], last
-    print("/init_helpers without LLM: OK")
+    assert asks == []
+    assert len(actions) == 1
+    assert any("up to date" in t for k, t in r._panel.messages if k == "system")
+    print("/init_helpers works without an LLM: OK")
+
+
+def test_parse_helper_init_cases():
+    p = Relai._parse_helper_init
+    v = RELAI_HELPER_VERSION
+    assert "installed" in p(f"RELAI_HELPER_INIT status=installed version={v} ok=1 reason=missing")
+    assert "up to date" in p(f"RELAI_HELPER_INIT status=current version={v} ok=1 reason=match")
+    assert "reinstalled" in p(f"RELAI_HELPER_INIT status=installed version={v} ok=1 reason=stale_or_modified")
+    assert "FAILED" in p(f"RELAI_HELPER_INIT status=installed version={v} ok=0 reason=stale_or_modified")
+    assert "Could not confirm" in p("nothing relevant here")
+    # Echo-safe: the command echo contains 'status=%s' but the real line wins.
+    echoed = (
+        'print("...status=%s version=%s ok=%s...")\n'
+        f"RELAI_HELPER_INIT status=installed version={v} ok=1 reason=missing"
+    )
+    assert "installed" in p(echoed)
+    print("_parse_helper_init cases: OK")
 
 
 def test_autoinit_removed():
-    r, _ = make_relai()
+    r, _, _ = make_relai()
     # The first-open auto-initialization machinery must be gone.
     assert not hasattr(r, "_helpers_init_attempted"), "auto-init flag should be gone"
     assert not hasattr(r, "_maybe_init_helpers"), "_maybe_init_helpers should be gone"
@@ -61,7 +111,7 @@ def test_autoinit_removed():
 
 
 def test_tab_completion():
-    r, _ = make_relai()
+    r, _, _ = make_relai()
     for ch in "/init":
         r._panel_key(ch.encode())
     r._panel_key(b"\t")
@@ -70,8 +120,9 @@ def test_tab_completion():
 
 
 if __name__ == "__main__":
-    test_init_helpers_command_starts_turn()
-    test_init_helpers_without_llm()
+    test_init_helpers_is_deterministic()
+    test_init_helpers_works_without_llm()
+    test_parse_helper_init_cases()
     test_autoinit_removed()
     test_tab_completion()
     print("all init-helpers tests passed")

@@ -15,6 +15,7 @@ import errno
 import fcntl
 import os
 import pty
+import re
 import select
 import shutil
 import signal
@@ -32,6 +33,7 @@ from .overlay import ScrollbackViewer
 from .panel import AiPanel
 from .render import Compositor, render_row
 from .screen import RelaiScreen
+from .helper_src import RELAI_HELPER_VERSION, helper_install_command
 from .session import (
     SessionStore,
     complete_slash,
@@ -150,21 +152,6 @@ Subcommands:
   - When self-recovering the interface, run `~/.relai/bin/relai_helper info`
     and `~/.relai/bin/relai_helper <subcmd> -h`."""
 
-# Sent to the agent when the user runs the ``/init_helpers`` panel command, so
-# it can (re)build its helper tooling on demand.
-HELPERS_INIT_PROMPT = (
-    "The user ran the /init_helpers command, asking you to set up your relai "
-    "helper tooling on this machine. Following the '## relai helpers' section of "
-    "your instructions, check whether ~/.relai/bin/relai_helper already exists and "
-    "works (run the cheap detection step). If it is present and functional, just "
-    "confirm that in one short line. If it is missing or broken, initialize your "
-    "helpers now: create ~/.relai/bin/relai_helper, chmod +x, validate it "
-    "(ast.parse + a smoke test), and report briefly what you created and how to "
-    "call it. Keep the whole exchange concise. You need an interactive shell prompt "
-    "in the foreground to run these commands; if the foreground is not a shell, say "
-    "so and ask the user to return to a shell first."
-)
-
 
 def _get_winsize(fd: int) -> tuple[int, int]:
     """Return (rows, cols) for the terminal on ``fd``.
@@ -277,6 +264,11 @@ class Relai:
         self._ask_thread: threading.Thread | None = None
         self._ask_result = ""
         self._ask_done = threading.Event()
+        # How a finished background job is delivered into the panel: LLM replies
+        # go through ``_deliver_reply`` (persisted), deterministic actions (e.g.
+        # ``/init_helpers``) through ``_deliver_system`` (ephemeral). Set when a
+        # job starts; ``_finish_ask`` falls back to a reply if unset.
+        self._deliver = None
         # Persistent conversation store. Created lazily the first time the panel
         # is opened (a fresh session per process) and reused across toggles; a
         # ``/sessions load`` rebinds it to the loaded session's file.
@@ -853,20 +845,65 @@ class Relai:
         self._render_split()
 
     def _cmd_init_helpers(self) -> None:
-        """Handle ``/init_helpers``: ask the agent to (re)build its helper tools.
+        """Handle ``/init_helpers``: install or repair ~/.relai/bin/relai_helper.
 
-        This starts a normal agent turn (part of the conversation/history) so the
-        model can create and validate ~/.relai/bin/relai_helper on the machine.
+        This is deterministic and does NOT involve the LLM. The harness ships the
+        canonical helper source and injects one self-contained shell command that
+        compares the on-disk md5 to the pinned golden md5 (without executing the
+        existing file) and rewrites it from an embedded base64 payload only when
+        it is missing, outdated, or modified. The command relies solely on the
+        foreground host's own python3/HOME, so it also works over ssh.
         """
         panel = self._panel
         if panel is None:
             return
-        if self.llm is None:
-            panel.add_system("No LLM provider configured; cannot initialize helpers.")
-            return
-        self._start_ask(
-            HELPERS_INIT_PROMPT,
-            info="Checking/initializing relai helpers\u2026",
+        command = helper_install_command()
+
+        def worker() -> str:
+            prompt_prefix = self._current_prompt_prefix()
+            self._write_all(self._master_fd, command.encode("utf-8") + b"\r")
+            snapshot = self._wait_for_injection_to_settle(command, prompt_prefix)
+            return self._parse_helper_init(snapshot)
+
+        self._start_action(
+            worker,
+            info=f"Installing/verifying relai_helper v{RELAI_HELPER_VERSION}\u2026",
+            activity="Installing relai_helper",
+        )
+
+    @staticmethod
+    def _parse_helper_init(snapshot: str) -> str:
+        """Turn the helper install command's output line into a status message.
+
+        Looks for the ``RELAI_HELPER_INIT status=... version=... ok=... reason=...``
+        line the injected command prints. The ``status`` value is constrained to
+        real words so the echoed command template (which contains ``status=%s``)
+        is not mistaken for the result.
+        """
+        m = re.search(
+            r"RELAI_HELPER_INIT status=(installed|current) version=(\S+) "
+            r"ok=([01]) reason=(\w+)",
+            snapshot,
+        )
+        if m is None:
+            return (
+                "Could not confirm relai_helper install -- no result seen. Make "
+                "sure the foreground is an interactive shell, then run "
+                "/init_helpers again."
+            )
+        status, ver, ok, reason = m.groups()
+        if ok != "1":
+            return (
+                f"relai_helper install FAILED (reason={reason}); the file on disk "
+                "does not match the expected checksum."
+            )
+        if status == "current":
+            return f"relai_helper is already up to date (v{ver}, checksum verified)."
+        if reason == "missing":
+            return f"relai_helper v{ver} installed (was not present)."
+        return (
+            f"relai_helper v{ver} reinstalled "
+            "(previous copy was outdated or modified)."
         )
 
     def _cmd_sessions(self, args: list[str]) -> None:
@@ -944,6 +981,7 @@ class Relai:
         panel.thinking = True
         panel.activity = "Thinking"
         panel.tick = 0
+        self._deliver = self._deliver_reply
         self._render_split()  # show the question and the spinner immediately
 
         ask = self._ai_ask
@@ -960,8 +998,55 @@ class Relai:
         self._ask_thread = threading.Thread(target=worker, daemon=True)
         self._ask_thread.start()
 
+    def _start_action(self, worker, *, info: str | None = None,
+                      activity: str = "Working") -> None:
+        """Run a deterministic background job (no LLM) with the panel spinner.
+
+        ``worker`` runs on a daemon thread and returns a status string that is
+        shown as an ephemeral "system" line (not persisted, not part of the LLM
+        conversation). Used for harness-driven actions such as ``/init_helpers``.
+        """
+        panel = self._panel
+        if panel is None or panel.thinking:
+            return
+        if info:
+            panel.add_info(info)
+        panel.thinking = True
+        panel.activity = activity
+        panel.tick = 0
+        self._deliver = self._deliver_system
+        self._render_split()
+
+        self._ask_done = threading.Event()
+
+        def run() -> None:
+            try:
+                result = worker()
+            except Exception as exc:  # surfaced to the user, never crashes relai
+                result = f"[relai] action failed: {exc}"
+            self._ask_result = result
+            self._ask_done.set()
+
+        self._ask_thread = threading.Thread(target=run, daemon=True)
+        self._ask_thread.start()
+
+    def _deliver_reply(self, result: str) -> None:
+        """Deliver a completed LLM reply into the panel and persist it."""
+        panel = self._panel
+        if panel is None:
+            return
+        panel.add_reply(result)
+        self._persist_session()
+
+    def _deliver_system(self, result: str) -> None:
+        """Deliver a deterministic action's status as an ephemeral system line."""
+        panel = self._panel
+        if panel is None:
+            return
+        panel.add_system(result)
+
     def _finish_ask(self) -> None:
-        """Deliver the completed background reply into the panel."""
+        """Deliver the completed background result into the panel."""
         if self._ask_thread is not None:
             self._ask_thread.join(timeout=1)
             self._ask_thread = None
@@ -969,8 +1054,8 @@ class Relai:
         if panel is None:
             return
         panel.thinking = False
-        panel.add_reply(self._ask_result)
-        self._persist_session()
+        deliver = self._deliver or self._deliver_reply
+        deliver(self._ask_result)
         self._render_split()
 
     def _ask_llm(self, question: str) -> str:
