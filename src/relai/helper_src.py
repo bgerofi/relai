@@ -46,7 +46,7 @@ RELAI_HELPER_MD5: str = hashlib.md5(RELAI_HELPER_SOURCE).hexdigest()
 # source. If ``assets/relai_helper`` is ever changed, this constant must be
 # updated to match -- so a silent swap of the asset is caught at import time,
 # and the harness only ever installs a helper whose checksum it vouches for.
-RELAI_HELPER_MD5_EXPECTED = "632660835bada7e0e170ec31dd2455a3"
+RELAI_HELPER_MD5_EXPECTED = "5f9292cb0b495277d02681a61d367265"
 
 if RELAI_HELPER_MD5 != RELAI_HELPER_MD5_EXPECTED:  # pragma: no cover - guard
     raise RuntimeError(

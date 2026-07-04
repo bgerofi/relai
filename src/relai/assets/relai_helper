@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
 import sys, os, base64, argparse, subprocess, re, fnmatch, difflib, py_compile
 
-VER = "0.2.1"
+VER = "0.2.2"
 CAPS = "read,write,append,replace,replace-range,search,run,info"
 
 def emit(op, payload_bytes=None, code=0, **meta):
@@ -140,11 +140,13 @@ def op_search(a):
 
 def op_run(a):
     cmd = base64.b64decode(a.b64).decode()
-    p = subprocess.run(cmd, shell=True, capture_output=True)
-    out = p.stdout
-    if p.stderr:
-        out += b"\n[stderr]\n" + p.stderr
-    return emit("run", out, p.returncode)
+    pr = subprocess.Popen(cmd, shell=True,
+                          stdout=subprocess.PIPE, stderr=subprocess.PIPE)
+    so, se = pr.communicate()
+    out = so
+    if se:
+        out += b"\n[stderr]\n" + se
+    return emit("run", out, pr.returncode)
 
 def op_info(a):
     txt = "relai_helper %s\ncaps=%s\npython=%s" % (VER, CAPS, sys.version.split()[0])
@@ -152,7 +154,11 @@ def op_info(a):
 
 def main():
     p = argparse.ArgumentParser(prog="relai_helper")
-    sub = p.add_subparsers(dest="cmd", required=True)
+    # NOTE: the required= keyword for subparsers needs Python 3.7+, so we leave
+    # the subcommand optional here and enforce that one was chosen manually
+    # below. This keeps the helper working on any Python 3.2+ (some hosts still
+    # ship 3.6).
+    sub = p.add_subparsers(dest="cmd")
     r = sub.add_parser("read"); r.add_argument("path"); r.add_argument("--start", type=int); r.add_argument("--end", type=int); r.set_defaults(fn=op_read)
     w = sub.add_parser("write"); w.add_argument("path"); w.add_argument("--b64", required=True); w.add_argument("--dry-run", action="store_true"); w.set_defaults(fn=op_write)
     ap = sub.add_parser("append"); ap.add_argument("path"); ap.add_argument("--b64", required=True); ap.set_defaults(fn=op_append)
@@ -162,6 +168,9 @@ def main():
     rn = sub.add_parser("run"); rn.add_argument("--b64", required=True); rn.set_defaults(fn=op_run)
     inf = sub.add_parser("info"); inf.set_defaults(fn=op_info)
     a = p.parse_args()
+    if not getattr(a, "fn", None):
+        p.print_help(sys.stderr)
+        sys.exit(2)
     sys.exit(a.fn(a))
 
 if __name__ == "__main__":

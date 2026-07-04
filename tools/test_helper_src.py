@@ -12,6 +12,7 @@ Run:
 import hashlib
 import os
 import re
+import shutil
 import subprocess
 import tempfile
 
@@ -33,6 +34,50 @@ def test_asset_integrity():
                      RELAI_HELPER_SOURCE, re.MULTILINE)
     assert RELAI_HELPER_SOURCE.startswith(b"#!")
     print("asset integrity + version: OK")
+
+
+def test_source_is_py36_compatible():
+    """Guarantee the helper avoids APIs/syntax newer than Python 3.6.
+
+    Some hosts still ship Python 3.6, so the helper must not use 3.7+-only
+    constructs. This scans for the known offenders and rejects any syntax newer
+    than 3.6 via the compiler's feature_version gate.
+    """
+    import ast
+
+    src = RELAI_HELPER_SOURCE
+    # subprocess.run(..., capture_output=True) is 3.7+; we use Popen instead.
+    assert b"capture_output" not in src, "capture_output is Python 3.7+"
+    # add_subparsers(required=...) keyword is 3.7+; must be enforced manually.
+    assert re.search(rb"add_subparsers\([^)]*required", src) is None, \
+        "add_subparsers(required=...) is Python 3.7+"
+    # No f-strings (fine in 3.6, but keep it % formatting for older readers).
+    assert re.search(rb"(?<![A-Za-z0-9_])[fF][\"']", src) is None, "no f-strings"
+    # Reject any syntax newer than 3.6 (walrus, positional-only params, ...).
+    ast.parse(src, feature_version=(3, 6))
+    print("source is Python 3.6-compatible: OK")
+
+
+def test_runs_under_old_python_if_available():
+    """If a real 3.5/3.6 interpreter is present, run the helper under it."""
+    old = None
+    for name in ("python3.5", "python3.6"):
+        path = shutil.which(name)
+        if path:
+            old = path
+            break
+    if old is None:
+        print("no old python found; skipped (scan test covers compatibility)")
+        return
+    with tempfile.NamedTemporaryFile("wb", suffix=".py", delete=False) as fh:
+        fh.write(RELAI_HELPER_SOURCE)
+        script = fh.name
+    try:
+        r = subprocess.run([old, script, "info"], capture_output=True, text=True)
+        assert r.returncode == 0 and "RELAI:BEGIN op=info" in r.stdout, (old, r.stderr)
+    finally:
+        os.unlink(script)
+    print("runs under %s: OK" % old)
 
 
 def test_command_is_quote_safe():
@@ -77,14 +122,21 @@ def test_install_current_and_repair():
         assert "status=installed" in out and "reason=stale_or_modified" in out, out
         assert hashlib.md5(open(dest, "rb").read()).hexdigest() == RELAI_HELPER_MD5
 
-        # 4. The repaired helper actually runs.
+        # 4. The repaired helper actually runs (info + a run subcommand).
         info = subprocess.run([dest, "info"], capture_output=True, text=True)
         assert info.returncode == 0 and "RELAI:BEGIN op=info" in info.stdout, info.stdout
+        import base64 as _b64
+        payload = _b64.b64encode(b"echo hi").decode()
+        run = subprocess.run([dest, "run", "--b64", payload],
+                             capture_output=True, text=True)
+        assert run.returncode == 0 and "op=run" in run.stdout, run.stdout
     print("install / current / repair round-trip: OK")
 
 
 if __name__ == "__main__":
     test_asset_integrity()
+    test_source_is_py36_compatible()
+    test_runs_under_old_python_if_available()
     test_command_is_quote_safe()
     test_install_current_and_repair()
     print("all helper_src tests passed")
