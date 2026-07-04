@@ -26,6 +26,7 @@ set; if several are configured, one is chosen by a fixed precedence
 from __future__ import annotations
 
 import os
+import time
 from dataclasses import dataclass, field
 from typing import Any, Sequence
 
@@ -154,6 +155,64 @@ class LLMError(RuntimeError):
 
 class LLMNotConfigured(RuntimeError):
     """Raised when no provider is fully configured."""
+
+
+def _root_cause(exc: BaseException) -> BaseException | None:
+    """Return the deepest chained cause of ``exc`` (``None`` if it has none).
+
+    SDK errors often wrap the real failure (e.g. an ``httpx.ReadTimeout``); the
+    root cause usually names what actually went wrong.
+    """
+    seen = {id(exc)}
+    cur = exc.__cause__ or exc.__context__
+    root: BaseException | None = None
+    while cur is not None and id(cur) not in seen:
+        seen.add(id(cur))
+        root = cur
+        cur = cur.__cause__ or cur.__context__
+    return root
+
+
+def _describe_request_error(
+    name: str, exc: BaseException, elapsed: float, timeout: float
+) -> str:
+    """Build a detailed one-line description of a failed provider request.
+
+    Shown to the user in the AI panel, so it stays on a single line. It surfaces
+    the exception type, how long the call ran versus the configured timeout, any
+    HTTP status / request-id the SDK exposes, and the underlying cause (e.g. the
+    ``httpx`` timeout hiding behind an SDK wrapper) -- enough to tell a genuine
+    timeout apart from an auth error, a rate limit, or a bad endpoint.
+    """
+    header = f"{name} request failed after {elapsed:.1f}s (timeout {timeout:.0f}s)"
+
+    cls = type(exc)
+    type_name = cls.__name__
+    module = (getattr(cls, "__module__", "") or "").split(".")[0]
+    if module and module not in ("builtins", "__main__"):
+        type_name = f"{module}.{type_name}"
+
+    text = str(exc).strip()
+    body = f"{type_name}: {text}" if text else type_name
+
+    root = _root_cause(exc)
+    if root is not None:
+        root_text = str(root).strip()
+        if root_text and root_text != text:
+            body += f" (cause: {type(root).__name__}: {root_text})"
+
+    meta = []
+    status = getattr(exc, "status_code", None)
+    if status is not None:
+        meta.append(f"status={status}")
+    request_id = getattr(exc, "request_id", None)
+    if request_id:
+        meta.append(f"request_id={request_id}")
+
+    msg = f"{header}: {body}"
+    if meta:
+        msg += f" [{' '.join(meta)}]"
+    return msg
 
 
 @dataclass(frozen=True)
@@ -438,6 +497,7 @@ class OpenAIClient(LLMClient):
         )
 
     def complete(self, messages: Sequence[Message], max_tokens: int = 1024) -> str:
+        start = time.monotonic()
         try:
             resp = self._client.chat.completions.create(
                 model=self.config.model,
@@ -445,7 +505,11 @@ class OpenAIClient(LLMClient):
                 max_tokens=max_tokens,
             )
         except Exception as exc:  # SDK raises its own error hierarchy
-            raise LLMError(f"{self.name} request failed: {exc}") from exc
+            raise LLMError(
+                _describe_request_error(
+                    self.name, exc, time.monotonic() - start, self.timeout
+                )
+            ) from exc
         self._last_usage = usage_from_response(resp, self.context_window)
         try:
             return resp.choices[0].message.content or ""
@@ -494,10 +558,15 @@ class AnthropicClient(LLMClient):
         }
         if system_parts:
             kwargs["system"] = "\n\n".join(system_parts)
+        start = time.monotonic()
         try:
             resp = self._client.messages.create(**kwargs)
         except Exception as exc:
-            raise LLMError(f"{self.name} request failed: {exc}") from exc
+            raise LLMError(
+                _describe_request_error(
+                    self.name, exc, time.monotonic() - start, self.timeout
+                )
+            ) from exc
         self._last_usage = usage_from_response(resp, self.context_window)
         try:
             return "".join(
@@ -530,10 +599,15 @@ class AnthropicClient(LLMClient):
                 }
                 for t in tools
             ]
+        start = time.monotonic()
         try:
             resp = self._client.messages.create(**kwargs)
         except Exception as exc:
-            raise LLMError(f"{self.name} request failed: {exc}") from exc
+            raise LLMError(
+                _describe_request_error(
+                    self.name, exc, time.monotonic() - start, self.timeout
+                )
+            ) from exc
         try:
             text_parts: list[str] = []
             blocks: list[dict] = []
@@ -630,6 +704,7 @@ class GoogleClient(LLMClient):
         if system_parts:
             config_kwargs["system_instruction"] = "\n\n".join(system_parts)
 
+        start = time.monotonic()
         try:
             resp = self._client.models.generate_content(
                 model=self.config.model,
@@ -637,7 +712,11 @@ class GoogleClient(LLMClient):
                 config=types.GenerateContentConfig(**config_kwargs),
             )
         except Exception as exc:
-            raise LLMError(f"{self.name} request failed: {exc}") from exc
+            raise LLMError(
+                _describe_request_error(
+                    self.name, exc, time.monotonic() - start, self.timeout
+                )
+            ) from exc
         try:
             text = resp.text
         except (AttributeError, TypeError) as exc:
