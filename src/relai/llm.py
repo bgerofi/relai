@@ -210,6 +210,51 @@ def resolve_config() -> ProviderConfig | None:
 # Clients
 # ---------------------------------------------------------------------------
 
+# Fallback context windows for well-known models, used only when neither the
+# *_CONTEXT_WINDOW env var nor the provider API supplies one. Matched as a
+# case-insensitive substring of the model id, most specific entries first.
+_KNOWN_CONTEXT_WINDOWS: tuple[tuple[str, int], ...] = (
+    # Anthropic (normally auto-detected via max_input_tokens).
+    ("claude", 200_000),
+    # OpenAI (the standard API does not report context size).
+    ("gpt-4.1", 1_047_576),
+    ("gpt-4o", 128_000),
+    ("gpt-4-turbo", 128_000),
+    ("gpt-4", 8_192),
+    ("gpt-3.5", 16_385),
+    ("o1", 200_000),
+    ("o3", 200_000),
+    ("o4", 200_000),
+    # Google (normally auto-detected via input_token_limit).
+    ("gemini-1.5-pro", 2_097_152),
+    ("gemini-1.5", 1_048_576),
+    ("gemini-2", 1_048_576),
+    ("gemini", 1_048_576),
+)
+
+
+def _known_context_window(model: str) -> int:
+    """Return a fallback context window for ``model`` (0 if not recognized)."""
+    m = (model or "").lower()
+    for needle, window in _KNOWN_CONTEXT_WINDOWS:
+        if needle in m:
+            return window
+    return 0
+
+
+def _first_positive_int(obj: Any, *names: str) -> int:
+    """Return the first positive integer among the named attrs/extra fields."""
+    extra = getattr(obj, "model_extra", None) or {}
+    for name in names:
+        val = getattr(obj, name, None)
+        if val is None and isinstance(extra, dict):
+            val = extra.get(name)
+        if isinstance(val, bool):
+            continue
+        if isinstance(val, (int, float)) and val > 0:
+            return int(val)
+    return 0
+
 
 class LLMClient:
     """Base class: a client that can complete a chat and verify connectivity."""
@@ -219,6 +264,9 @@ class LLMClient:
         self.timeout = timeout
         # Usage from the most recent request (set by complete/converse).
         self._last_usage: Usage | None = None
+        # Context window learned from the provider's models API (0 = not yet
+        # detected / unavailable). See :meth:`detect_context_window`.
+        self._detected_context_window: int = 0
 
     @property
     def name(self) -> str:
@@ -230,7 +278,25 @@ class LLMClient:
 
     @property
     def context_window(self) -> int:
-        return self.config.context_window
+        """The model's max input context window in tokens (0 = unknown).
+
+        Precedence: an explicit ``*_CONTEXT_WINDOW`` env override, then a value
+        auto-detected from the provider API, then a small table of well-known
+        models. 0 means unknown, and the context-usage badge is hidden.
+        """
+        if self.config.context_window > 0:
+            return self.config.context_window
+        if self._detected_context_window > 0:
+            return self._detected_context_window
+        return _known_context_window(self.config.model)
+
+    def detect_context_window(self) -> int:
+        """Best-effort query of the model's max input context window.
+
+        Returns 0 when the provider cannot report it. Overridden per provider;
+        implementations must never raise (return 0 on any failure).
+        """
+        return 0
 
     def complete(self, messages: Sequence[Message], max_tokens: int = 1024) -> str:
         """Return the assistant's reply text for ``messages``."""
@@ -262,9 +328,16 @@ class LLMClient:
     def verify(self) -> None:
         """Make a minimal request to confirm URL, key, and model all work.
 
-        Raises :class:`LLMError` on any failure.
+        Raises :class:`LLMError` on any failure. On success, and only when the
+        context window was not pinned via ``*_CONTEXT_WINDOW``, it also tries to
+        auto-detect the model's context window (never fatal).
         """
         self.complete([{"role": "user", "content": "ping"}], max_tokens=1)
+        if self.config.context_window <= 0 and self._detected_context_window <= 0:
+            try:
+                self._detected_context_window = self.detect_context_window() or 0
+            except Exception:
+                self._detected_context_window = 0
 
 
 class OpenAIClient(LLMClient):
@@ -287,6 +360,22 @@ class OpenAIClient(LLMClient):
             base_url = base_url[: -len("/chat/completions")]
         self._client = OpenAI(
             api_key=config.api_key, base_url=base_url, timeout=timeout
+        )
+
+    def detect_context_window(self) -> int:
+        # The standard OpenAI API doesn't report context size, but many
+        # OpenAI-compatible servers do (e.g. vLLM's ``max_model_len``).
+        try:
+            info = self._client.models.retrieve(self.config.model)
+        except Exception:
+            return 0
+        return _first_positive_int(
+            info,
+            "max_model_len",
+            "max_context_length",
+            "context_length",
+            "context_window",
+            "max_input_tokens",
         )
 
     def complete(self, messages: Sequence[Message], max_tokens: int = 1024) -> str:
@@ -326,6 +415,14 @@ class AnthropicClient(LLMClient):
         self._client = Anthropic(
             api_key=config.api_key, base_url=base_url, timeout=timeout
         )
+
+    def detect_context_window(self) -> int:
+        # Anthropic's models API reports ``max_input_tokens`` (context window).
+        try:
+            info = self._client.models.retrieve(self.config.model)
+        except Exception:
+            return 0
+        return _first_positive_int(info, "max_input_tokens")
 
     def complete(self, messages: Sequence[Message], max_tokens: int = 1024) -> str:
         # Anthropic takes the system prompt separately from the message list.
@@ -447,6 +544,14 @@ class GoogleClient(LLMClient):
             base_url=config.api_url, timeout=int(timeout * 1000)
         )
         self._client = genai.Client(api_key=config.api_key, http_options=http_options)
+
+    def detect_context_window(self) -> int:
+        # Gemini's model metadata reports ``input_token_limit``.
+        try:
+            info = self._client.models.get(model=self.config.model)
+        except Exception:
+            return 0
+        return _first_positive_int(info, "input_token_limit")
 
     def complete(self, messages: Sequence[Message], max_tokens: int = 1024) -> str:
         types = self._types

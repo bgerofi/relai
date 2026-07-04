@@ -1054,6 +1054,20 @@ class Relai:
             "(for example quitting the current program to run something else), do "
             "NOT exit on your own -- first explain the better approach and confirm "
             "with the user, and only exit the application once they agree.\n\n"
+            "IMPORTANT: Keep every response you show to the user in plain "
+            "7-bit ASCII so it renders on any terminal. Do NOT emit non-ASCII "
+            "characters such as Unicode dashes, curly quotes, arrows, em-dashes, "
+            "box-drawing glyphs or emoji -- terminals that cannot render them "
+            "show a '?' instead. Use '-' for bullets and dashes, straight ' and "
+            "\" quotes, and '->' for arrows.\n\n"
+            "When helper tools under ~/.relai/bin/ are available (check with "
+            "'ls ~/.relai/bin/' and 'relai_helper info' early in a session), "
+            "PREFER them for reading, editing, and searching files -- e.g. "
+            "'relai_helper read', 'replace', 'search'. They pass content as "
+            "base64 and return a sentinel-framed exit code, which eliminates "
+            "the shell/escape/quoting corruption that ad-hoc 'python3 -c' or "
+            "heredoc edits suffer from. Do NOT hand-roll multi-layer quoted "
+            "scripts to edit a file when a helper can do it in one call.\n\n"
             + RELAI_HELPERS_DOC
         )
 
