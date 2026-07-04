@@ -295,6 +295,20 @@ class Relai:
         self.screen = RelaiScreen(cols, rows)
         self.stream = pyte.ByteStream(self.screen)
 
+        # Optional raw-output capture for diagnosing display glitches. When
+        # ``RELAI_CAPTURE`` names a path, every byte read from the child (plus
+        # markers for events relai injects, such as the resize on panel open) is
+        # appended there verbatim so the exact escape sequences can be replayed.
+        self._capture_fd: int | None = None
+        cap = os.environ.get("RELAI_CAPTURE")
+        if cap:
+            try:
+                self._capture_fd = os.open(
+                    cap, os.O_WRONLY | os.O_CREAT | os.O_APPEND, 0o600
+                )
+            except OSError:
+                self._capture_fd = None
+
     # -- lifecycle -----------------------------------------------------------
 
     def run(self) -> int:
@@ -319,6 +333,9 @@ class Relai:
             return self._loop()
         finally:
             self._restore_term()
+            if self._capture_fd is not None:
+                os.close(self._capture_fd)
+                self._capture_fd = None
 
     # -- screen inspection (for the AI layer) --------------------------------
 
@@ -543,6 +560,7 @@ class Relai:
         app_rows = max(1, self._phys_rows - self._panel_height)
         self.screen.resize(app_rows, self._phys_cols)
         _set_winsize(self._master_fd, app_rows, self._phys_cols)
+        self._capture(marker=b"resize %dx%d" % (app_rows, self._phys_cols))
 
     def _split_loop(self) -> None:
         master = self._master_fd
@@ -1801,6 +1819,8 @@ class Relai:
             raise
         if not data:
             return None
+        if fd == self._master_fd:
+            self._capture(data)
         return data
 
     def _write_all(self, fd: int, data: bytes) -> None:
@@ -1813,6 +1833,22 @@ class Relai:
                     continue
                 raise
             data = data[n:]
+
+    def _capture(self, data: bytes = b"", marker: bytes | None = None) -> None:
+        """Append raw child output (or an event ``marker``) to the capture file.
+
+        No-op unless ``RELAI_CAPTURE`` was set. Markers are wrapped so they are
+        visibly distinct from real child bytes when the file is inspected.
+        """
+        if self._capture_fd is None:
+            return
+        try:
+            if marker is not None:
+                os.write(self._capture_fd, b"\n<<relai:" + marker + b">>\n")
+            else:
+                os.write(self._capture_fd, data)
+        except OSError:
+            pass
 
     def _reap_child(self) -> int:
         """Wait for the child and translate its status into an exit code."""
