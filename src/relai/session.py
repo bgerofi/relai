@@ -203,6 +203,7 @@ SLASH_COMMANDS: dict[str, list[str]] = {
     "compact": [],
     "help": [],
     "init_helpers": [],
+    "mcp_refresh": [],
     "sessions": ["list", "load"],
 }
 
@@ -219,6 +220,11 @@ SLASH_COMMAND_HELP: list[tuple[str, str]] = [
         "/init_helpers",
         "Install or verify ~/.relai/bin/relai_helper on the foreground host "
         "(for precise file read/edit/search).",
+    ),
+    (
+        "/mcp_refresh",
+        "Reconnect to the MCP servers in ~/.relai/mcp.json and refresh their "
+        "tool definitions.",
     ),
     ("/sessions list", "List saved conversation sessions (current is marked *)."),
     ("/sessions load <n>|<id>", "Load and resume a saved session by number or id."),

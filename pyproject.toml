@@ -9,6 +9,7 @@ dependencies = [
     "openai>=1.40",
     "anthropic>=0.34",
     "google-genai>=1.0",
+    "mcp>=1.0",
 ]
 
 [project.scripts]

@@ -76,14 +76,15 @@ def main():
             pass
 
     text = transcript.decode("utf-8", "replace")
+    lower = text.lower()
     sys.stdout.write("===== RAW TRANSCRIPT (tail) =====\n")
     sys.stdout.write(repr(text[-2500:]))
     sys.stdout.write("\n===== SUMMARY =====\n")
     checks = {
         "inline prompt shown": "relai> " in text,
         "question echoed": "What number appears" in text,
-        "thinking indicator": "thinking" in text,
-        "answer mentions 42": "42" in text.split("thinking")[-1],
+        "thinking indicator": "thinking" in lower,
+        "answer mentions 42": "42" in lower.split("thinking")[-1],
         "no alt-screen switch": "\x1b[?1049h" not in text,
         "shell usable after": "AFTER_AI_OK" in text,
     }

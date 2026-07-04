@@ -34,6 +34,7 @@ from .panel import AiPanel
 from .render import Compositor, render_row
 from .screen import RelaiScreen
 from .helper_src import RELAI_HELPER_VERSION, helper_install_command
+from .mcp import McpManager
 from .session import (
     SessionStore,
     SUMMARY_MARKER,
@@ -289,12 +290,24 @@ class Relai:
         # The session summaries from the most recent ``/sessions list``, so
         # ``/sessions load <n>`` can resolve a 1-based index to a session id.
         self._session_list: list[dict] = []
+        # External MCP servers (~/.relai/mcp.json). Created lazily on first panel
+        # open; ``_mcp_started`` guards the one-off automatic discovery.
+        self._mcp: McpManager | None = None
+        self._mcp_started = False
 
         rows, cols = _get_winsize(self._stdout_fd)
         # pyte keeps a live model of what the child has drawn on screen, plus a
         # scrollback of normal-buffer output that scrolled off the top.
         self.screen = RelaiScreen(cols, rows)
         self.stream = pyte.ByteStream(self.screen)
+        # GNU screen / tmux "set window title" sequences (ESC k <text> ST) are
+        # not understood by pyte, which then prints the title text into the
+        # model -- so our snapshots show garbage like the title glued in front
+        # of the prompt. We strip these from the copy fed to the pyte model
+        # only; the verbatim passthrough to the real terminal is untouched, so
+        # the actual screen/tmux tab title still updates correctly. This buffer
+        # holds a partial sequence split across reads.
+        self._title_carry = b""
 
         # Optional raw-output capture for diagnosing display glitches. When
         # ``RELAI_CAPTURE`` names a path, every byte read from the child (plus
@@ -334,6 +347,9 @@ class Relai:
             return self._loop()
         finally:
             self._restore_term()
+            if self._mcp is not None:
+                self._mcp.close()
+                self._mcp = None
             if self._capture_fd is not None:
                 os.close(self._capture_fd)
                 self._capture_fd = None
@@ -446,7 +462,7 @@ class Relai:
                     break
                 if data:
                     # Feed the screen model, then pass through verbatim.
-                    self.stream.feed(data)
+                    self._feed_model(data)
                     self._write_all(self._stdout_fd, data)
 
             if stdin in readable:
@@ -551,10 +567,35 @@ class Relai:
             self._stdout_fd, b"\x1b[?25h" + _PASTE_ON + self._compositor.clear()
         )
         self._render_split()
+        self._maybe_start_mcp()
         try:
             self._split_loop()
         finally:
             self._leave_split()
+
+    def _maybe_start_mcp(self) -> None:
+        """Discover external MCP tools once, the first time the panel opens.
+
+        Runs on the panel spinner (via :meth:`_start_action`) so a slow or
+        unreachable server never blocks the UI; the result is shown as a system
+        line. Does nothing when there is no ``~/.relai/mcp.json``.
+        """
+        if self._mcp_started:
+            return
+        self._mcp_started = True
+        if self._mcp is None:
+            self._mcp = McpManager()
+        if not self._mcp.config_exists():
+            return
+
+        def worker() -> str:
+            return self._mcp.refresh().report()
+
+        self._start_action(
+            worker,
+            info="Discovering MCP tools\u2026",
+            activity="Discovering MCP tools",
+        )
 
     def _apply_split_size(self) -> None:
         """Resize the model and child PTY to the region above the panel."""
@@ -582,7 +623,7 @@ class Relai:
                     self._panel_closing = True
                     break
                 if data:
-                    self.stream.feed(data)
+                    self._feed_model(data)
                     self._render_split()
             if stdin in readable:
                 data = self._read(stdin)
@@ -873,6 +914,8 @@ class Relai:
             self._cmd_init_helpers()
         elif cmd == "compact":
             self._cmd_compact()
+        elif cmd == "mcp_refresh":
+            self._cmd_mcp_refresh()
         elif cmd == "help":
             self._cmd_help()
         else:
@@ -948,6 +991,30 @@ class Relai:
             worker,
             info="Compacting conversation context\u2026",
             activity="Compacting context",
+        )
+
+    def _cmd_mcp_refresh(self) -> None:
+        """Handle ``/mcp_refresh``: re-read mcp.json and rediscover tools."""
+        panel = self._panel
+        if panel is None:
+            return
+        if self._mcp is None:
+            self._mcp = McpManager()
+            self._mcp_started = True
+        if not self._mcp.config_exists():
+            panel.add_system(
+                "No MCP config found. Create ~/.relai/mcp.json with a "
+                '"servers" map (VS Code format) to add MCP servers.'
+            )
+            return
+
+        def worker() -> str:
+            return self._mcp.refresh().report()
+
+        self._start_action(
+            worker,
+            info="Refreshing MCP servers\u2026",
+            activity="Refreshing MCP servers",
         )
 
     @staticmethod
@@ -1378,6 +1445,16 @@ class Relai:
 
     def _llm_tools(self) -> list[ToolSpec]:
         """Tools advertised to the model for this session."""
+        return self._builtin_tools() + self._mcp_tools()
+
+    def _mcp_tools(self) -> list[ToolSpec]:
+        """Namespaced tools discovered from external MCP servers (if any)."""
+        if self._mcp is None:
+            return []
+        return self._mcp.tool_specs()
+
+    def _builtin_tools(self) -> list[ToolSpec]:
+        """relai's own, always-available tools."""
         return [
             ToolSpec(
                 name="inject_input",
@@ -1523,6 +1600,10 @@ class Relai:
             return self._tool_b64_encode(call.input)
         if call.name == "b64_decode":
             return self._tool_b64_decode(call.input)
+        if self._mcp is not None and self._mcp.is_mcp_tool(call.name):
+            if self._panel is not None:
+                self._panel.activity = f"Calling {call.name}"
+            return self._mcp.call_tool(call.name, call.input)
         return f"[relai] unknown tool: {call.name}"
 
     def _tool_b64_encode(self, args: dict) -> str:
@@ -1818,6 +1899,31 @@ class Relai:
             f"{body}\n"
             "</screenHistory>"
         )
+
+    # Screen/tmux "set window title" sequences: ESC k <text> (ST | BEL).
+    # ST is ESC \ or the single-byte 0x9c; some emitters use BEL (0x07).
+    _TITLE_SEQ = re.compile(rb"\x1bk[^\x1b\x07\x9c]*(?:\x1b\\|\x07|\x9c)")
+
+    def _feed_model(self, data: bytes) -> None:
+        """Feed child output to the pyte model, stripping screen/tmux title
+        sequences that pyte does not understand (it would otherwise print the
+        title text into the model, corrupting our snapshots). The verbatim
+        passthrough to the real terminal is unaffected, so the actual tab
+        title still updates."""
+        buf = self._title_carry + data
+        self._title_carry = b""
+        buf = self._TITLE_SEQ.sub(b"", buf)
+        # Hold back an unterminated title sequence (ESC k with no ST/BEL yet)
+        # so its partial payload never reaches the model; feed it once the
+        # terminator arrives in a later read. Cap the carry so a malformed
+        # stream cannot grow it without bound.
+        idx = buf.rfind(b"\x1bk")
+        if idx != -1 and not re.search(rb"\x1b\\|\x07|\x9c", buf[idx:]):
+            if len(buf) - idx <= 4096:
+                self._title_carry = buf[idx:]
+                buf = buf[:idx]
+        if buf:
+            self.stream.feed(buf)
 
     def _read(self, fd: int) -> bytes | None:
         """Read from ``fd``. Return ``None`` on EOF/child-gone, else bytes."""
