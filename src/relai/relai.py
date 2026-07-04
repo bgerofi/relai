@@ -36,9 +36,12 @@ from .screen import RelaiScreen
 from .helper_src import RELAI_HELPER_VERSION, helper_install_command
 from .session import (
     SessionStore,
+    SUMMARY_MARKER,
+    SUMMARY_MARKER_END,
     complete_slash,
     list_sessions,
     load_session,
+    working_history,
 )
 from .llm import ToolSpec
 
@@ -219,6 +222,15 @@ class Relai:
     #: Output token budget for the agent's replies. The provider default (1024)
     #: truncates longer answers mid-sentence, so the panel asks for more room.
     REPLY_MAX_TOKENS = 8192
+
+    #: When the prompt fills this percent of the model's context window, the
+    #: conversation is automatically compacted into a summary before the next
+    #: turn so it never runs out of room.
+    CONTEXT_COMPACT_PCT = 80.0
+
+    #: Output token budget for the compaction summary. Kept small so the reseeded
+    #: context is a tiny fraction of the window.
+    SUMMARY_MAX_TOKENS = 2048
 
     def __init__(
         self,
@@ -840,6 +852,8 @@ class Relai:
             self._cmd_sessions(args)
         elif cmd == "init_helpers":
             self._cmd_init_helpers()
+        elif cmd == "compact":
+            self._cmd_compact()
         else:
             panel.add_system(f"Unknown command: /{cmd or ''}")
         self._render_split()
@@ -869,6 +883,40 @@ class Relai:
             worker,
             info=f"Installing/verifying relai_helper v{RELAI_HELPER_VERSION}\u2026",
             activity="Installing relai_helper",
+        )
+
+    def _cmd_compact(self) -> None:
+        """Handle ``/compact``: compress the conversation context on demand.
+
+        Same mechanism as the automatic 80%-full compaction, but triggered
+        manually. Runs on the panel spinner and reports the result as a system
+        line. A conversation that is empty or already just a summary seed is left
+        untouched.
+        """
+        panel = self._panel
+        if panel is None:
+            return
+        if self.llm is None:
+            panel.add_system("No LLM provider configured; nothing to compact.")
+            return
+        if len(self._llm_history) <= 2:
+            panel.add_system("Conversation is already compact.")
+            return
+
+        before = len(self._llm_history)
+
+        def worker() -> str:
+            summary = self._compact_history()
+            if not summary:
+                return "Compaction failed; the conversation was left unchanged."
+            pct = panel.context_pct
+            pct_note = f", context now ~{pct:.0f}%" if pct is not None else ""
+            return f"Compacted {before} messages into a summary{pct_note}."
+
+        self._start_action(
+            worker,
+            info="Compacting conversation context\u2026",
+            activity="Compacting context",
         )
 
     @staticmethod
@@ -955,7 +1003,7 @@ class Relai:
             panel.add_system(f"Could not load session: {session_id}")
             return
         messages = [tuple(m) for m in data.get("messages", [])]
-        self._llm_history = list(data.get("llm_history", []))
+        self._llm_history = working_history(list(data.get("llm_history", [])))
         self._panel_messages = messages
         panel.restore(messages)
         # Continue writing into the loaded session's file from now on.
@@ -1045,6 +1093,102 @@ class Relai:
             return
         panel.add_system(result)
 
+    def _maybe_compact(self) -> None:
+        """Compact the model context into a summary if it is nearly full.
+
+        Triggered when the last turn's prompt filled at least
+        ``CONTEXT_COMPACT_PCT`` of the model's context window. A history that is
+        already just a fresh summary seed (<= 2 messages) is left alone.
+        """
+        if self.llm is None or len(self._llm_history) <= 2:
+            return
+        panel = self._panel
+        pct = panel.context_pct if panel is not None else None
+        if pct is None or pct < self.CONTEXT_COMPACT_PCT:
+            return
+        self._compact_history()
+
+    def _compact_history(self) -> str | None:
+        """Summarize the running conversation and reseed the context from it.
+
+        Asks the model to condense the whole ``_llm_history`` into a resumable
+        brief, then purges the history and replaces it with a two-message seed
+        (the summary + an acknowledgement). The visible transcript keeps the full
+        conversation with a compaction marker, and the persisted session then
+        resumes from this summary. Returns the summary text, or ``None`` if the
+        summary request failed (the history is then left unchanged).
+        """
+        panel = self._panel
+        if panel is not None:
+            panel.activity = "Compacting context"
+            self._render_split()
+        summary = self._summarize_history()
+        if not summary:
+            return None  # failed; keep going with the uncompacted history
+        self._llm_history = [
+            {
+                "role": "user",
+                "content": f"{SUMMARY_MARKER}\n{summary}\n{SUMMARY_MARKER_END}",
+            },
+            {
+                "role": "assistant",
+                "content": "Understood. I will continue the task from this summary.",
+            },
+        ]
+        if panel is not None:
+            panel.add_summary(summary)
+            panel.context_pct = self._estimate_context_pct(summary)
+            panel.activity = "Thinking"
+        self._persist_session()
+        return summary
+
+    def _summarize_history(self) -> str | None:
+        """Ask the model to summarize ``_llm_history`` into a resumable brief.
+
+        Returns the summary text, or ``None`` if the request fails (compaction is
+        then skipped and the conversation continues uncompacted).
+        """
+        instruction = (
+            "You are about to run out of context window. Summarize the ENTIRE "
+            "conversation above into concise notes that let you CONTINUE the "
+            "task with no loss of essential information: the user's goal(s), the "
+            "decisions made, facts, commands and file paths discovered, the "
+            "current state of the work and the terminal, and the immediate next "
+            "steps. Write it as a compact brief to yourself. Omit greetings, "
+            "apologies, and filler."
+        )
+        messages = [
+            {
+                "role": "system",
+                "content": "You compact your own working memory into a "
+                "resumable brief so you can keep working after older turns are "
+                "dropped.",
+            },
+            *self._llm_history,
+            {"role": "user", "content": instruction},
+        ]
+        try:
+            turn = self.llm.converse(
+                messages, tools=None, max_tokens=self.SUMMARY_MAX_TOKENS
+            )
+        except Exception as exc:  # never crash the ask; just skip compaction
+            if self._panel is not None:
+                self._panel.add_info(f"[relai] context compaction failed: {exc}")
+            return None
+        return (turn.text or "").strip() or None
+
+    def _estimate_context_pct(self, summary: str) -> float | None:
+        """Rough post-compaction context usage (~4 chars/token + seed overhead).
+
+        The next real turn replaces this with the provider-reported value; this
+        just makes the badge reflect the drop immediately.
+        """
+        cw = getattr(self.llm, "context_window", 0) or 0
+        if cw <= 0:
+            return None
+        approx_tokens = (len(summary) + 400) // 4
+        return max(0.0, min(100.0, 100.0 * approx_tokens / cw))
+
     def _finish_ask(self) -> None:
         """Deliver the completed background result into the panel."""
         if self._ask_thread is not None:
@@ -1083,10 +1227,6 @@ class Relai:
         system = {"role": "system", "content": self._llm_system_prompt()}
         tools = self._llm_tools()
 
-        # Remember where this turn starts so a mid-flight failure can be rolled
-        # back cleanly, leaving the history well-formed (no dangling tool_use).
-        checkpoint = len(self._llm_history)
-        self._llm_history.append({"role": "user", "content": user_content})
         # Surface automatic retries (timeouts, rate limits, ...) in the panel so
         # the user can see relai is waiting rather than hung.
         panel = self._panel
@@ -1095,6 +1235,16 @@ class Relai:
                 panel.add_info(note)
                 panel.activity = "Retrying"
             self.llm.on_retry = _on_retry
+
+        # Compact the running context into a summary before it fills the model's
+        # window. Done here (history ends with a clean assistant turn) so the new
+        # turn starts with plenty of headroom.
+        self._maybe_compact()
+
+        # Remember where this turn starts so a mid-flight failure can be rolled
+        # back cleanly, leaving the history well-formed (no dangling tool_use).
+        checkpoint = len(self._llm_history)
+        self._llm_history.append({"role": "user", "content": user_content})
         try:
             while True:
                 if panel is not None:

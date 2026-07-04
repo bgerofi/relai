@@ -69,6 +69,16 @@ class AiPanel:
         self._messages.append(("info", text))
         self.scroll = 0
 
+    def add_summary(self, text: str) -> None:
+        """Mark a context-compaction point in the transcript.
+
+        The transcript keeps the full human-readable conversation, but the
+        model-facing context is purged and reseeded from this summary. The line
+        is persisted so a reloaded session shows where compaction happened.
+        """
+        self._messages.append(("summary", text))
+        self.scroll = 0
+
     def add_system(self, text: str) -> None:
         """Add an ephemeral in-panel note (slash-command echo/output).
 
@@ -154,6 +164,16 @@ class AiPanel:
                         lines.append(
                             _CYAN + _DIM + seg.encode("utf-8", "replace")
                             + _RESET + _EOL
+                        )
+            elif kind == "summary":
+                header = "\u2500\u2500 context compacted \u00b7 summary \u2500\u2500"
+                lines.append(
+                    _DIM + _CYAN + header.encode("utf-8", "replace") + _RESET + _EOL
+                )
+                for para in logical:
+                    for seg in _wrap(para, self.cols):
+                        lines.append(
+                            _DIM + seg.encode("utf-8", "replace") + _RESET + _EOL
                         )
             else:
                 for para in logical:

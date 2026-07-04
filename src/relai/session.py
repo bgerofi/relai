@@ -28,8 +28,16 @@ _DAY_FMT = "%Y-%m-%d"
 _TIME_FMT = "%H_%M_%S"
 
 # Message kinds that are part of the real conversation and therefore persisted.
-# Slash-command echoes/output use the "system" kind and are never saved.
-_PERSISTED_KINDS = ("you", "relai", "info")
+# Slash-command echoes/output use the "system" kind and are never saved. The
+# "summary" kind marks an automatic context-compaction point (see the compaction
+# logic in :mod:`relai`).
+_PERSISTED_KINDS = ("you", "relai", "info", "summary")
+
+# Text marker wrapping a compaction summary in the model-facing ``llm_history``.
+# It is ordinary message content (safe to send to any provider) and lets us find
+# the latest summary when resuming a conversation.
+SUMMARY_MARKER = "<conversationSummary>"
+SUMMARY_MARKER_END = "</conversationSummary>"
 
 
 def sessions_root() -> Path:
@@ -166,11 +174,33 @@ def load_session(
     return data
 
 
+def working_history(
+    llm_history: list[dict[str, Any]]
+) -> list[dict[str, Any]]:
+    """Return the resumable slice of a stored ``llm_history``.
+
+    Automatic compaction replaces the model-facing context with a summary seed
+    whose first message content starts with :data:`SUMMARY_MARKER`. When a
+    conversation is resumed we start from the *last* such summary, so it always
+    continues from its latest compression point and never replays the purged
+    pre-summary turns. Histories without a marker are returned unchanged.
+    """
+    start = 0
+    for i, msg in enumerate(llm_history):
+        if not isinstance(msg, dict) or msg.get("role") != "user":
+            continue
+        content = msg.get("content")
+        if isinstance(content, str) and content.lstrip().startswith(SUMMARY_MARKER):
+            start = i
+    return list(llm_history[start:])
+
+
 # -- slash commands ---------------------------------------------------------
 
 # Registry of in-panel commands and their subcommands. Used both to dispatch and
 # to drive Tab completion. Keep the subcommand lists sorted for stable output.
 SLASH_COMMANDS: dict[str, list[str]] = {
+    "compact": [],
     "init_helpers": [],
     "sessions": ["list", "load"],
 }

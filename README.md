@@ -160,6 +160,18 @@ export RELAI_LLM_TIMEOUT=120
 export RELAI_LLM_MAX_RETRIES=3
 ```
 
+### Automatic context compaction
+
+The AI panel shows a `[NN%]` badge with how much of the model's context window
+the conversation currently uses. When it passes **80%**, relai automatically
+asks the model to summarize the conversation so far into a compact,
+continue-the-task brief, then replaces the running context with that summary and
+keeps going — so a long session never runs out of context. The full transcript
+stays visible in the panel (a `── context compacted · summary ──` line marks
+where it happened); only the model-facing history is trimmed. When a session is
+reloaded, it always resumes from its latest summary. You can also trigger this
+manually at any time with the **`/compact`** command.
+
 ## Assistant tools
 
 Once an LLM provider is configured, the AI agent can act inside your terminal
