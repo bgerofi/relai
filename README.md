@@ -6,7 +6,7 @@ no matter where you are running.
 
 Because **relai** operates at the pseudo-terminal (PTY) layer rather than inside any
 particular application, it integrates **seamlessly with any terminal and any
-program**: plain shells, full-screen TUI apps (`htop`, `vim`, `claude`), and
+program**: arbitrary shells, full-screen TUI apps (`htop`, `vim`, `claude`), and
 REPLs all work unchanged. There is nothing to configure per-app; if it runs in a
 terminal, relai can drive it.
 
@@ -15,14 +15,14 @@ travels with you across `ssh` hops and nested `tmux`/`screen` sessions, the
 agent keeps working on the far side without any agent or API key installed on
 the remote host. Your session, wherever it goes, carries the agent along.
 
-You are in control by default. relai just relays, until you summon the
-agent. Once you do, it can:
+You are in control by default, but once you summon the
+agent, it can:
 
 - **Run commands** on your behalf (and read back their output).
 - **Control interactive applications** by sending real keystrokes, edit in
   `vim`, page through `less`, drive a Python REPL, and so on.
 - **Focus on specific parts of the screen, including scrollback history**, so it
-  can reason about exactly what you are looking at, not just the last line.
+  can reason about exactly what you have been looking at.
 - Through enhanced **helpers** you can also acomplish more complex tasks, such as
   coding or debugging, issue resolution and triaging, etc.
 
@@ -34,9 +34,10 @@ agent. Once you do, it can:
   keystrokes and reading the real screen. There is no host application it needs
   to be embedded in and nothing to register on the far side.
 - RelAI is **not a terminal emulator with AI bolted on**. It does not implement a
-  terminal, replace your shell, or ask you to adopt a new one. It runs *inside*
+  terminal, swap you onto a different shell, or ask you to adopt a new one. It
+  launches your own `$SHELL` (or the command you give it) and runs *inside*
   whatever terminal you already use (xterm, iTerm, Alacritty, ghostty, Windows Terminal,
-  a `tmux`/`screen` pane, etc.) and relays the byte stream transparently.
+  a `tmux`/`screen` pane, etc.), relaying the byte stream transparently.
   Your terminal, keybindings, and workflow stay exactly as they were.
 
 ## Status
@@ -247,9 +248,10 @@ are full terminal-emulator replacements — the thing relai deliberately is *not
 | Dimension | RelAI | Butterfish | TmuxAI | AIShell | Headless drivers |
 |---|:---:|:---:|:---:|:---:|:---:|
 | In-band, human-driven | ✅ | ✅ | ✅ | ✅ | ✗ |
+| Full terminal- & program-indepence (i.e., nothing to modify) | ✅ | ✗ (its shell) | ✗ (tmux) | ✗ (its shell) | ✗ (launches the program) |
 | Works at the raw PTY layer (no shell/tmux/emulator dependency) | ✅ | shell-wrapper | needs tmux | shell-wrapper | spawns its own PTY |
 | Reasons about the rendered screen **and** scrollback (not just shell history) | ✅ | ✗ | ✅ | partial | ✅ |
 | Drives arbitrary full-screen TUIs (`vim`, `htop`, `claude`) | ✅ | ✗ | ✅ | ✗ | ✅ |
-| Host-transparent across `ssh`/nested tmux, nothing installed remotely | ✅ | local shell | tmux-side | local | ✗ |
+| Host-transparent across `ssh`, nothing installed remotely | ✅ | local shell only | tmux-side | local only | ✗ |
 | Resizable in-terminal agent panel + conversation sessions | ✅ | inline shell | chat pane | ✗ | N/A |
 | Agentic tool-calling loop | ✅ | ✅ | ✅ | ✗ | driven externally |
