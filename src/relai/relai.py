@@ -38,6 +38,7 @@ from .session import (
     SessionStore,
     SUMMARY_MARKER,
     SUMMARY_MARKER_END,
+    SLASH_COMMAND_HELP,
     complete_slash,
     list_sessions,
     load_session,
@@ -872,9 +873,21 @@ class Relai:
             self._cmd_init_helpers()
         elif cmd == "compact":
             self._cmd_compact()
+        elif cmd == "help":
+            self._cmd_help()
         else:
             panel.add_system(f"Unknown command: /{cmd or ''}")
         self._render_split()
+
+    def _cmd_help(self) -> None:
+        """Handle ``/help``: list the internal panel commands and what they do."""
+        panel = self._panel
+        if panel is None:
+            return
+        panel.add_system("Internal panel commands (not sent to the LLM):")
+        width = max(len(usage) for usage, _ in SLASH_COMMAND_HELP)
+        for usage, desc in SLASH_COMMAND_HELP:
+            panel.add_system(f"  {usage.ljust(width)}  {desc}")
 
     def _cmd_init_helpers(self) -> None:
         """Handle ``/init_helpers``: install or repair ~/.relai/bin/relai_helper.

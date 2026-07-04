@@ -201,9 +201,28 @@ def working_history(
 # to drive Tab completion. Keep the subcommand lists sorted for stable output.
 SLASH_COMMANDS: dict[str, list[str]] = {
     "compact": [],
+    "help": [],
     "init_helpers": [],
     "sessions": ["list", "load"],
 }
+
+# One-line usage + description for each command, shown by ``/help``. Ordered the
+# way they should be listed. Keep in sync with :data:`SLASH_COMMANDS`.
+SLASH_COMMAND_HELP: list[tuple[str, str]] = [
+    ("/help", "Show this list of internal panel commands."),
+    (
+        "/compact",
+        "Summarise the conversation so far and replace the working context "
+        "with that summary, freeing up the context window.",
+    ),
+    (
+        "/init_helpers",
+        "Install or verify ~/.relai/bin/relai_helper on the foreground host "
+        "(for precise file read/edit/search).",
+    ),
+    ("/sessions list", "List saved conversation sessions (current is marked *)."),
+    ("/sessions load <n>|<id>", "Load and resume a saved session by number or id."),
+]
 
 
 def _common_completion(word: str, matches: list[str]) -> str | None:
