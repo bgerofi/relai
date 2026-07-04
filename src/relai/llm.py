@@ -1,12 +1,17 @@
 """LLM provider clients.
 
-relai talks to one of three providers, selected purely by environment
-variables. For each provider the user sets a triplet:
+relai talks to one of three providers, selected from a triplet of variables per
+provider:
 
     OpenAI:     OPENAI_API_URL     OPENAI_API_KEY     OPENAI_MODEL
     Anthropic:  ANTHROPIC_API_URL  ANTHROPIC_API_KEY  ANTHROPIC_MODEL
     Google:     GOOGLE_API_URL     GOOGLE_API_KEY     GOOGLE_MODEL
     Custom:     CUSTOM_API_URL     CUSTOM_API_KEY     CUSTOM_MODEL
+
+These variables are read from the process environment and, as a fallback, from a
+``~/.relai/llm.conf`` file (simple ``KEY=VALUE`` lines). Environment variables
+take precedence over the file, so the file provides defaults that can still be
+overridden per-invocation.
 
 The "openai" and "custom" providers use the official ``openai`` SDK (custom just
 points ``base_url`` at an OpenAI-compatible server: LM Studio, llama.cpp, vLLM,
@@ -148,7 +153,7 @@ class LLMError(RuntimeError):
 
 
 class LLMNotConfigured(RuntimeError):
-    """Raised when no provider is fully configured via environment variables."""
+    """Raised when no provider is fully configured."""
 
 
 @dataclass(frozen=True)
@@ -174,15 +179,65 @@ _ENV_PREFIX = {
     "custom": "CUSTOM",
 }
 
+#: Location of the optional config file, read as a fallback for the provider
+#: variables. Real environment variables always take precedence over it.
+def _conf_path() -> str:
+    return os.path.join(os.path.expanduser("~"), ".relai", "llm.conf")
 
-def _read_provider(name: str) -> ProviderConfig | None:
-    """Return a ProviderConfig if all three env vars for ``name`` are set."""
+
+def _load_conf(path: str | None = None) -> dict[str, str]:
+    """Parse ``~/.relai/llm.conf`` into a ``{KEY: VALUE}`` dict.
+
+    The format is simple ``KEY=VALUE`` lines. Blank lines and lines starting
+    with ``#`` are ignored, a leading ``export`` is allowed, and matching single
+    or double quotes around the value are stripped. Returns an empty dict when
+    the file is absent or cannot be read (this is only a convenience fallback).
+    """
+    if path is None:
+        path = _conf_path()
+    values: dict[str, str] = {}
+    try:
+        with open(path, "r", encoding="utf-8") as fh:
+            lines = fh.readlines()
+    except OSError:
+        return values
+    for raw in lines:
+        line = raw.strip()
+        if not line or line.startswith("#"):
+            continue
+        if line.startswith("export "):
+            line = line[len("export "):].lstrip()
+        key, sep, val = line.partition("=")
+        if not sep:
+            continue
+        key = key.strip()
+        val = val.strip()
+        if len(val) >= 2 and val[0] == val[-1] and val[0] in ("'", '"'):
+            val = val[1:-1]
+        if key:
+            values[key] = val
+    return values
+
+
+def _getvar(conf: dict[str, str], name: str) -> str | None:
+    """Return env var ``name`` if set, else its value from ``conf`` (or None)."""
+    if name in os.environ:
+        return os.environ[name]
+    return conf.get(name)
+
+
+def _read_provider(name: str, conf: dict[str, str]) -> ProviderConfig | None:
+    """Return a ProviderConfig if all three variables for ``name`` are set.
+
+    Each variable is taken from the environment, falling back to ``conf`` (the
+    parsed ``~/.relai/llm.conf``); the environment always wins.
+    """
     prefix = _ENV_PREFIX[name]
-    url = os.environ.get(f"{prefix}_API_URL")
-    key = os.environ.get(f"{prefix}_API_KEY")
-    model = os.environ.get(f"{prefix}_MODEL")
+    url = _getvar(conf, f"{prefix}_API_URL")
+    key = _getvar(conf, f"{prefix}_API_KEY")
+    model = _getvar(conf, f"{prefix}_MODEL")
     if url and key and model:
-        ctx_raw = os.environ.get(f"{prefix}_CONTEXT_WINDOW", "")
+        ctx_raw = _getvar(conf, f"{prefix}_CONTEXT_WINDOW") or ""
         try:
             ctx = int(ctx_raw)
         except (TypeError, ValueError):
@@ -198,9 +253,13 @@ def _read_provider(name: str) -> ProviderConfig | None:
 
 
 def resolve_config() -> ProviderConfig | None:
-    """Select a provider from the environment, or None if none is configured."""
+    """Select a provider from the environment / ``~/.relai/llm.conf``.
+
+    Returns ``None`` if no provider is fully configured.
+    """
+    conf = _load_conf()
     for name in _PROVIDER_ORDER:
-        cfg = _read_provider(name)
+        cfg = _read_provider(name, conf)
         if cfg is not None:
             return cfg
     return None
@@ -597,7 +656,8 @@ def _client_for(config: ProviderConfig, timeout: float) -> LLMClient:
 
 
 def create_client(timeout: float = DEFAULT_TIMEOUT) -> LLMClient:
-    """Resolve config from the environment and build the matching client.
+    """Resolve config from the environment / ``~/.relai/llm.conf`` and build the
+    matching client.
 
     Raises :class:`LLMNotConfigured` if no provider is fully configured.
     """
@@ -605,6 +665,7 @@ def create_client(timeout: float = DEFAULT_TIMEOUT) -> LLMClient:
     if config is None:
         raise LLMNotConfigured(
             "no LLM provider configured; set the API_URL, API_KEY and MODEL "
-            "environment variables for OPENAI, ANTHROPIC, GOOGLE, or CUSTOM"
+            "variables for OPENAI, ANTHROPIC, GOOGLE, or CUSTOM (in the "
+            "environment or in ~/.relai/llm.conf)"
         )
     return _client_for(config, timeout)

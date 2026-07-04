@@ -94,8 +94,8 @@ Change the prefix with `--prefix` (e.g. `relai --prefix ctrl-o`).
 
 ## LLM configuration
 
-relai selects an LLM provider entirely from environment variables. Set the
-three variables for one provider:
+relai selects an LLM provider from a triplet of variables. Set the three
+variables for one provider:
 
 | Provider  | URL                 | Key                 | Model             |
 |-----------|---------------------|---------------------|-------------------|
@@ -103,6 +103,12 @@ three variables for one provider:
 | Anthropic | `ANTHROPIC_API_URL` | `ANTHROPIC_API_KEY` | `ANTHROPIC_MODEL` |
 | Google    | `GOOGLE_API_URL`    | `GOOGLE_API_KEY`    | `GOOGLE_MODEL`    |
 | Custom    | `CUSTOM_API_URL`    | `CUSTOM_API_KEY`    | `CUSTOM_MODEL`    |
+
+These variables are read from the **environment** and, as a fallback, from a
+**`~/.relai/llm.conf`** file. This lets you keep your provider settings in one
+place instead of exporting them in every shell. Environment variables always
+take precedence over the file, so you can override any single value per
+invocation.
 
 The **custom** provider speaks the OpenAI-compatible API, so it works with local
 servers (LM Studio, llama.cpp, vLLM, Ollama's OpenAI shim) and gateways. Google
@@ -114,11 +120,21 @@ no provider is configured, relai runs as a plain relay. Use `--no-llm` to skip
 LLM setup entirely.
 
 ```bash
-# Example: OpenAI
+# Example: OpenAI, via the environment
 export OPENAI_API_URL=https://api.openai.com/v1
 export OPENAI_API_KEY=sk-...
 export OPENAI_MODEL=gpt-4o
 relai
+```
+
+`~/.relai/llm.conf` uses the same variable names, one `KEY=VALUE` per line
+(blank lines and `#` comments are ignored, and a leading `export` is allowed):
+
+```ini
+# ~/.relai/llm.conf
+OPENAI_API_URL=https://api.openai.com/v1
+OPENAI_API_KEY=sk-...
+OPENAI_MODEL=gpt-4o
 ```
 
 ## Assistant tools
