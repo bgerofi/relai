@@ -204,3 +204,57 @@ modified.
 | **Availability** | Always present | Optional; installed/repaired via `/init_helpers` |
 | **Lifetime** | Live for the process | Persist across sessions |
 | **Purpose** | The only way the agent acts at all | Make file read/edit/search reliable and corruption-proof |
+
+## Related work
+
+Other projects put an AI agent near the terminal, but they fall into two camps
+that are each distinct from relai.
+
+**Headless drivers** — the *agent* spawns and owns a session and drives it
+programmatically; the human is out of the loop and reviews the result:
+
+- [agent-tty](https://github.com/coder/agent-tty) (coder) — hands a real,
+  long-lived PTY to an agent and records reviewable proof (text snapshots, PNG
+  screenshots, WebM video, asciicast) via a Ghostty renderer.
+- [agent-terminal](https://github.com/jasonkneen/agent-terminal) (jasonkneen) —
+  a `node-pty` wrapper exposed as an MCP server; an external agent reads the
+  ASCII buffer and sends keys.
+- [pilotty](https://github.com/msmps/pilotty) (msmps) — daemon-managed headless
+  PTY sessions with VT100 emulation, snapshots, and detected UI elements.
+
+**In-band assistants** — a human drives and the AI rides along in the *live*
+session. These are the closest in spirit to relai:
+
+- [Butterfish](https://github.com/bakks/butterfish) (bakks) — the closest on UX.
+  Wraps your shell in a PTY; you prompt inline (capital letter to ask, `!` for
+  agent mode, `@` for a one-shot command) and the AI sees your shell history. It
+  reasons over shell command history rather than the rendered screen, and is
+  tied to the local `bash`/`zsh`.
+- [TmuxAI](https://github.com/alvinunreal/tmuxai) (alvinunreal) — the closest in
+  philosophy ("a colleague sitting next to you"). Reads all your tmux panes in
+  real time via a chat/exec pane split, but requires tmux.
+- [AIShell](https://github.com/changjonathanc/aishell) (changjonathanc) — a
+  transparent shell wrapper that captures screen content as AI context, but
+  offers help commands rather than an agentic loop.
+
+Further out: [Warp](https://www.warp.dev/) and Microsoft's
+[Intelligent Terminal](https://devblogs.microsoft.com/commandline/announcing-intelligent-terminal-version-0-1/)
+are full terminal-emulator replacements — the thing relai deliberately is *not*
+(see [What RelAI is not?](#what-relai-is-not)).
+
+### How relai compares
+
+| Dimension | relai | Butterfish | TmuxAI | AIShell | Headless drivers |
+|---|:---:|:---:|:---:|:---:|:---:|
+| In-band, human-driven | ✅ | ✅ | ✅ | ✅ | ✗ |
+| Works at the raw PTY layer (no shell/tmux/emulator dependency) | ✅ | shell-wrapper | needs tmux | shell-wrapper | spawns its own PTY |
+| Reasons about the rendered screen **and** scrollback (not just shell history) | ✅ | ✗ | ✅ | partial | ✅ |
+| Drives arbitrary full-screen TUIs (`vim`, `htop`, `claude`) | ✅ | ✗ | ✅ | ✗ | ✅ |
+| Host-transparent across `ssh`/nested tmux, nothing installed remotely | ✅ | local shell | tmux-side | local | ✗ |
+| Resizable in-terminal agent panel + conversation sessions | ✅ | inline shell | chat pane | ✗ | N/A |
+| Agentic tool-calling loop | ✅ | ✅ | ✅ | ✗ | driven externally |
+
+Butterfish is the closest on UX and TmuxAI the closest in philosophy, but
+neither combines relai's three-way pitch: raw-PTY transparency with *no*
+shell/tmux/emulator dependency, screen-and-scrollback reasoning over *any*
+program, and traveling across `ssh` with nothing installed on the remote host.
