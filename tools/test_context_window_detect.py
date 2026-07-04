@@ -51,7 +51,7 @@ def build(name, model, context_window=0):
         model=model,
         context_window=context_window,
     )
-    return _client_for(cfg, DEFAULT_TIMEOUT)
+    return _client_for(cfg, DEFAULT_TIMEOUT, 0)
 
 
 def test_known_table():

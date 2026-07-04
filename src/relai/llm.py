@@ -21,6 +21,11 @@ Ollama's OpenAI shim, gateways, ...). The "anthropic" provider uses the official
 A provider is considered "configured" only when all three of its variables are
 set; if several are configured, one is chosen by a fixed precedence
 (custom > google > anthropic > openai).
+
+Two optional settings tune request behaviour (env or ``~/.relai/llm.conf``):
+``RELAI_LLM_TIMEOUT`` (seconds per request, default 30) and
+``RELAI_LLM_MAX_RETRIES`` (retries on timeout / dropped connection / rate limit /
+5xx, default 2). relai owns the retry loop so it can report each retry in the UI.
 """
 
 from __future__ import annotations
@@ -28,10 +33,14 @@ from __future__ import annotations
 import os
 import time
 from dataclasses import dataclass, field
-from typing import Any, Sequence
+from typing import Any, Callable, Sequence
 
 #: How long (seconds) to wait on any single LLM request.
 DEFAULT_TIMEOUT = 30.0
+
+#: How many times to retry a transient LLM failure (timeout, dropped
+#: connection, rate limit, 5xx) before giving up.
+DEFAULT_MAX_RETRIES = 2
 
 #: A chat message. ``content`` is usually a string, but for tool use it may be a
 #: list of provider-native content blocks (text / tool_use / tool_result).
@@ -215,6 +224,30 @@ def _describe_request_error(
     return msg
 
 
+#: Exception class names (openai / anthropic SDKs share these) and HTTP status
+#: codes that indicate a transient failure worth retrying.
+_RETRYABLE_TYPES = frozenset(
+    {
+        "APITimeoutError",
+        "APIConnectionError",
+        "APIConnectionTimeoutError",
+        "RateLimitError",
+        "InternalServerError",
+        "ServerError",
+        "ServiceUnavailableError",
+    }
+)
+_RETRYABLE_STATUS = frozenset({408, 409, 429, 500, 502, 503, 504})
+
+
+def _is_retryable(exc: BaseException) -> bool:
+    """True if ``exc`` looks like a transient failure worth retrying."""
+    if type(exc).__name__ in _RETRYABLE_TYPES:
+        return True
+    status = getattr(exc, "status_code", None)
+    return isinstance(status, int) and status in _RETRYABLE_STATUS
+
+
 @dataclass(frozen=True)
 class ProviderConfig:
     """Resolved configuration for the selected provider."""
@@ -377,14 +410,53 @@ def _first_positive_int(obj: Any, *names: str) -> int:
 class LLMClient:
     """Base class: a client that can complete a chat and verify connectivity."""
 
-    def __init__(self, config: ProviderConfig, timeout: float = DEFAULT_TIMEOUT) -> None:
+    def __init__(self, config: ProviderConfig, timeout: float = DEFAULT_TIMEOUT,
+                 max_retries: int = DEFAULT_MAX_RETRIES) -> None:
         self.config = config
         self.timeout = timeout
+        self.max_retries = max(0, int(max_retries))
+        # Optional progress hook, called with a short human-readable note before
+        # each retry so the UI can report what relai is doing while it waits.
+        self.on_retry: Callable[[str], None] | None = None
         # Usage from the most recent request (set by complete/converse).
         self._last_usage: Usage | None = None
         # Context window learned from the provider's models API (0 = not yet
         # detected / unavailable). See :meth:`detect_context_window`.
         self._detected_context_window: int = 0
+
+    def _request(self, call: Callable[[], Any], *, what: str = "request") -> Any:
+        """Run one provider API ``call``, retrying transient failures.
+
+        Retries up to ``self.max_retries`` times on timeouts, dropped
+        connections, rate limits and 5xx responses, with exponential backoff.
+        Before each retry the ``on_retry`` hook (if set) is called so the UI can
+        report the wait. Non-retryable errors, and the final attempt's error,
+        are wrapped in :class:`LLMError` with full diagnostics.
+        """
+        attempts = self.max_retries + 1
+        for attempt in range(1, attempts + 1):
+            start = time.monotonic()
+            try:
+                return call()
+            except Exception as exc:  # SDK raises its own error hierarchy
+                elapsed = time.monotonic() - start
+                if attempt >= attempts or not _is_retryable(exc):
+                    raise LLMError(
+                        _describe_request_error(
+                            self.name, exc, elapsed, self.timeout
+                        )
+                    ) from exc
+                delay = min(0.5 * (2 ** (attempt - 1)), 8.0)
+                if self.on_retry is not None:
+                    self.on_retry(
+                        f"{self.name} {what} failed "
+                        f"({type(exc).__name__} after {elapsed:.0f}s); "
+                        f"retrying {attempt}/{self.max_retries} in {delay:.0f}s"
+                    )
+                time.sleep(delay)
+        # Unreachable (the loop always returns or raises), but keeps type
+        # checkers happy about the function always returning a value.
+        raise LLMError(f"{self.name} request failed")
 
     @property
     def name(self) -> str:
@@ -466,8 +538,9 @@ class OpenAIClient(LLMClient):
     appends the path itself.
     """
 
-    def __init__(self, config: ProviderConfig, timeout: float = DEFAULT_TIMEOUT) -> None:
-        super().__init__(config, timeout)
+    def __init__(self, config: ProviderConfig, timeout: float = DEFAULT_TIMEOUT,
+                 max_retries: int = DEFAULT_MAX_RETRIES) -> None:
+        super().__init__(config, timeout, max_retries)
         try:
             from openai import OpenAI
         except ImportError as exc:  # pragma: no cover - dependency guard
@@ -476,8 +549,10 @@ class OpenAIClient(LLMClient):
         base_url = config.api_url
         if base_url.endswith("/chat/completions"):
             base_url = base_url[: -len("/chat/completions")]
+        # relai owns retries (see LLMClient._request) so it can report them; tell
+        # the SDK not to retry on its own.
         self._client = OpenAI(
-            api_key=config.api_key, base_url=base_url, timeout=timeout
+            api_key=config.api_key, base_url=base_url, timeout=timeout, max_retries=0
         )
 
     def detect_context_window(self) -> int:
@@ -497,19 +572,13 @@ class OpenAIClient(LLMClient):
         )
 
     def complete(self, messages: Sequence[Message], max_tokens: int = 1024) -> str:
-        start = time.monotonic()
-        try:
-            resp = self._client.chat.completions.create(
+        resp = self._request(
+            lambda: self._client.chat.completions.create(
                 model=self.config.model,
                 messages=list(messages),
                 max_tokens=max_tokens,
             )
-        except Exception as exc:  # SDK raises its own error hierarchy
-            raise LLMError(
-                _describe_request_error(
-                    self.name, exc, time.monotonic() - start, self.timeout
-                )
-            ) from exc
+        )
         self._last_usage = usage_from_response(resp, self.context_window)
         try:
             return resp.choices[0].message.content or ""
@@ -520,8 +589,9 @@ class OpenAIClient(LLMClient):
 class AnthropicClient(LLMClient):
     """Anthropic client via the ``anthropic`` SDK."""
 
-    def __init__(self, config: ProviderConfig, timeout: float = DEFAULT_TIMEOUT) -> None:
-        super().__init__(config, timeout)
+    def __init__(self, config: ProviderConfig, timeout: float = DEFAULT_TIMEOUT,
+                 max_retries: int = DEFAULT_MAX_RETRIES) -> None:
+        super().__init__(config, timeout, max_retries)
         try:
             from anthropic import Anthropic
         except ImportError as exc:  # pragma: no cover - dependency guard
@@ -535,8 +605,10 @@ class AnthropicClient(LLMClient):
             if base_url.endswith(suffix):
                 base_url = base_url[: -len(suffix)]
                 break
+        # relai owns retries (see LLMClient._request) so it can report them; tell
+        # the SDK not to retry on its own.
         self._client = Anthropic(
-            api_key=config.api_key, base_url=base_url, timeout=timeout
+            api_key=config.api_key, base_url=base_url, timeout=timeout, max_retries=0
         )
 
     def detect_context_window(self) -> int:
@@ -558,15 +630,7 @@ class AnthropicClient(LLMClient):
         }
         if system_parts:
             kwargs["system"] = "\n\n".join(system_parts)
-        start = time.monotonic()
-        try:
-            resp = self._client.messages.create(**kwargs)
-        except Exception as exc:
-            raise LLMError(
-                _describe_request_error(
-                    self.name, exc, time.monotonic() - start, self.timeout
-                )
-            ) from exc
+        resp = self._request(lambda: self._client.messages.create(**kwargs))
         self._last_usage = usage_from_response(resp, self.context_window)
         try:
             return "".join(
@@ -599,15 +663,7 @@ class AnthropicClient(LLMClient):
                 }
                 for t in tools
             ]
-        start = time.monotonic()
-        try:
-            resp = self._client.messages.create(**kwargs)
-        except Exception as exc:
-            raise LLMError(
-                _describe_request_error(
-                    self.name, exc, time.monotonic() - start, self.timeout
-                )
-            ) from exc
+        resp = self._request(lambda: self._client.messages.create(**kwargs))
         try:
             text_parts: list[str] = []
             blocks: list[dict] = []
@@ -660,8 +716,9 @@ class GoogleClient(LLMClient):
     ``user`` / ``model`` roles. ``api_url`` sets the SDK ``base_url``.
     """
 
-    def __init__(self, config: ProviderConfig, timeout: float = DEFAULT_TIMEOUT) -> None:
-        super().__init__(config, timeout)
+    def __init__(self, config: ProviderConfig, timeout: float = DEFAULT_TIMEOUT,
+                 max_retries: int = DEFAULT_MAX_RETRIES) -> None:
+        super().__init__(config, timeout, max_retries)
         try:
             from google import genai
             from google.genai import types
@@ -704,19 +761,13 @@ class GoogleClient(LLMClient):
         if system_parts:
             config_kwargs["system_instruction"] = "\n\n".join(system_parts)
 
-        start = time.monotonic()
-        try:
-            resp = self._client.models.generate_content(
+        resp = self._request(
+            lambda: self._client.models.generate_content(
                 model=self.config.model,
                 contents=contents,
                 config=types.GenerateContentConfig(**config_kwargs),
             )
-        except Exception as exc:
-            raise LLMError(
-                _describe_request_error(
-                    self.name, exc, time.monotonic() - start, self.timeout
-                )
-            ) from exc
+        )
         try:
             text = resp.text
         except (AttributeError, TypeError) as exc:
@@ -725,18 +776,55 @@ class GoogleClient(LLMClient):
         return text or ""
 
 
-def _client_for(config: ProviderConfig, timeout: float) -> LLMClient:
+def _client_for(
+    config: ProviderConfig, timeout: float, max_retries: int
+) -> LLMClient:
     if config.name == "anthropic":
-        return AnthropicClient(config, timeout)
+        return AnthropicClient(config, timeout, max_retries)
     if config.name == "google":
-        return GoogleClient(config, timeout)
+        return GoogleClient(config, timeout, max_retries)
     # "openai" and "custom" both use the OpenAI SDK.
-    return OpenAIClient(config, timeout)
+    return OpenAIClient(config, timeout, max_retries)
 
 
-def create_client(timeout: float = DEFAULT_TIMEOUT) -> LLMClient:
+def _resolve_settings(conf: dict[str, str]) -> tuple[float, int]:
+    """Read the request timeout and retry count from env / ``~/.relai/llm.conf``.
+
+    ``RELAI_LLM_TIMEOUT`` is in seconds, ``RELAI_LLM_MAX_RETRIES`` a count; each
+    falls back to its module default when unset or unparseable.
+    """
+    timeout = DEFAULT_TIMEOUT
+    raw_timeout = _getvar(conf, "RELAI_LLM_TIMEOUT")
+    if raw_timeout:
+        try:
+            parsed = float(raw_timeout)
+            if parsed > 0:
+                timeout = parsed
+        except ValueError:
+            pass
+
+    max_retries = DEFAULT_MAX_RETRIES
+    raw_retries = _getvar(conf, "RELAI_LLM_MAX_RETRIES")
+    if raw_retries:
+        try:
+            parsed_int = int(raw_retries)
+            if parsed_int >= 0:
+                max_retries = parsed_int
+        except ValueError:
+            pass
+
+    return timeout, max_retries
+
+
+def create_client(
+    timeout: float | None = None, max_retries: int | None = None
+) -> LLMClient:
     """Resolve config from the environment / ``~/.relai/llm.conf`` and build the
     matching client.
+
+    The request ``timeout`` (seconds) and ``max_retries`` come from
+    ``RELAI_LLM_TIMEOUT`` / ``RELAI_LLM_MAX_RETRIES`` (env or ``~/.relai/llm.conf``)
+    unless passed explicitly.
 
     Raises :class:`LLMNotConfigured` if no provider is fully configured.
     """
@@ -747,4 +835,9 @@ def create_client(timeout: float = DEFAULT_TIMEOUT) -> LLMClient:
             "variables for OPENAI, ANTHROPIC, GOOGLE, or CUSTOM (in the "
             "environment or in ~/.relai/llm.conf)"
         )
-    return _client_for(config, timeout)
+    conf_timeout, conf_retries = _resolve_settings(_load_conf())
+    if timeout is None:
+        timeout = conf_timeout
+    if max_retries is None:
+        max_retries = conf_retries
+    return _client_for(config, timeout, max_retries)

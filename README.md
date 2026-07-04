@@ -137,6 +137,29 @@ OPENAI_API_KEY=sk-...
 OPENAI_MODEL=gpt-4o
 ```
 
+### Timeouts and retries
+
+Each request waits up to **`RELAI_LLM_TIMEOUT`** seconds (default `30`). On a
+transient failure — a timeout, a dropped connection, a rate limit, or a `5xx`
+response — relai retries up to **`RELAI_LLM_MAX_RETRIES`** times (default `2`,
+with exponential backoff) and reports each retry in the AI panel. When a request
+finally fails, the panel shows the exception type, how long it ran versus the
+timeout, and the underlying cause, e.g.:
+
+```
+[relai] request failed: anthropic request failed after 30.0s (timeout 30s):
+anthropic.APITimeoutError: Request timed out ... (cause: TimeoutError: ...)
+```
+
+Both settings are read from the environment or `~/.relai/llm.conf`. If you see
+frequent timeouts on slow models or links, raise the timeout (and optionally the
+retry count):
+
+```bash
+export RELAI_LLM_TIMEOUT=120
+export RELAI_LLM_MAX_RETRIES=3
+```
+
 ## Assistant tools
 
 Once an LLM provider is configured, the AI agent can act inside your terminal

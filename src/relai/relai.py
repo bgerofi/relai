@@ -1087,8 +1087,18 @@ class Relai:
         # back cleanly, leaving the history well-formed (no dangling tool_use).
         checkpoint = len(self._llm_history)
         self._llm_history.append({"role": "user", "content": user_content})
+        # Surface automatic retries (timeouts, rate limits, ...) in the panel so
+        # the user can see relai is waiting rather than hung.
+        panel = self._panel
+        if panel is not None:
+            def _on_retry(note: str) -> None:
+                panel.add_info(note)
+                panel.activity = "Retrying"
+            self.llm.on_retry = _on_retry
         try:
             while True:
+                if panel is not None:
+                    panel.activity = "Thinking"
                 turn = self.llm.converse(
                     [system, *self._llm_history],
                     tools=tools,
