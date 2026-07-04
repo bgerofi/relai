@@ -1,8 +1,8 @@
 # RelAI
 
-**relai** is an AI agent that sits transparently on the
-character stream between you and whatever program you run. The agent is always
-one keystroke away, no matter where you are running.
+**relai** is an AI agent that sits transparently on the character stream between you
+and whatever terminal based program you run. The agent is always one keystroke away,
+no matter where you are running.
 
 Because **relai** operates at the pseudo-terminal (PTY) layer rather than inside any
 particular application, it integrates **seamlessly with any terminal and any
