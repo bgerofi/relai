@@ -10,6 +10,7 @@ foundation the AI overlay/agent will later read from.
 
 from __future__ import annotations
 
+import base64
 import errno
 import fcntl
 import os
@@ -1067,7 +1068,10 @@ class Relai:
             "base64 and return a sentinel-framed exit code, which eliminates "
             "the shell/escape/quoting corruption that ad-hoc 'python3 -c' or "
             "heredoc edits suffer from. Do NOT hand-roll multi-layer quoted "
-            "scripts to edit a file when a helper can do it in one call.\n\n"
+            "scripts to edit a file when a helper can do it in one call. Use the "
+            "native 'b64_encode'/'b64_decode' tools to build the base64 payloads "
+            "for relai_helper and to read its base64 result frames, instead of "
+            "'printf | base64' / 'base64 -d' in the shell.\n\n"
             "(relai_helper v0.2.0+ adds safer edits: 'replace --expect-count N' "
             "fails without writing if the match count differs; '--dry-run' on "
             "replace/write returns a unified diff instead of writing; "
@@ -1173,6 +1177,45 @@ class Relai:
                     "required": ["offset", "length"],
                 },
             ),
+            ToolSpec(
+                name="b64_encode",
+                description=(
+                    "Encode UTF-8 text to base64 natively (no shell, no "
+                    "terminal round-trip). Use this to build the base64 "
+                    "payloads that relai_helper subcommands expect (e.g. "
+                    "--b64 / --old-b64 / --new-b64), avoiding fragile "
+                    "'printf | base64' shell quoting. Returns the base64 string."
+                ),
+                input_schema={
+                    "type": "object",
+                    "properties": {
+                        "text": {
+                            "type": "string",
+                            "description": "The literal text to base64-encode.",
+                        },
+                    },
+                    "required": ["text"],
+                },
+            ),
+            ToolSpec(
+                name="b64_decode",
+                description=(
+                    "Decode a base64 string to UTF-8 text natively (no shell). "
+                    "Use this to read base64 payloads returned inside "
+                    "relai_helper's RELAI:BEGIN/END result frames without piping "
+                    "through 'base64 -d' on screen. Returns the decoded text."
+                ),
+                input_schema={
+                    "type": "object",
+                    "properties": {
+                        "b64": {
+                            "type": "string",
+                            "description": "The base64 string to decode.",
+                        },
+                    },
+                    "required": ["b64"],
+                },
+            ),
         ]
 
     def _run_tool(self, call: "ToolCall") -> str:
@@ -1181,7 +1224,28 @@ class Relai:
             return self._tool_inject_input(call.input)
         if call.name == "capture_screen_history":
             return self._tool_capture_screen_history(call.input)
+        if call.name == "b64_encode":
+            return self._tool_b64_encode(call.input)
+        if call.name == "b64_decode":
+            return self._tool_b64_decode(call.input)
         return f"[relai] unknown tool: {call.name}"
+
+    def _tool_b64_encode(self, args: dict) -> str:
+        """Base64-encode text natively (no shell/PTY round-trip)."""
+        text = args.get("text")
+        if not isinstance(text, str):
+            return "[relai] b64_encode: 'text' must be a string"
+        return base64.b64encode(text.encode("utf-8")).decode("ascii")
+
+    def _tool_b64_decode(self, args: dict) -> str:
+        """Base64-decode a string to UTF-8 text natively (no shell)."""
+        data = args.get("b64")
+        if not isinstance(data, str):
+            return "[relai] b64_decode: 'b64' must be a string"
+        try:
+            return base64.b64decode(data, validate=True).decode("utf-8", "replace")
+        except Exception as exc:
+            return f"[relai] b64_decode: invalid base64: {exc}"
 
     def _tool_inject_input(self, args: dict) -> str:
         """Inject keystrokes into the child PTY (relai performs the tool call).
