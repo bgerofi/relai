@@ -218,8 +218,18 @@ class Relai:
     #: command's brief silence never pre-empts the fast prompt-return path.
     SETTLE_QUIET_WINDOW = 1.30
 
-    #: Absolute cap (seconds) on how long to wait for injected input to settle.
-    SETTLE_MAX_WAIT = 120.0
+    #: Absolute cap (seconds) on how long to wait for injected input to settle
+    #: in the normal (shell/REPL) case.
+    SETTLE_MAX_WAIT = 20.0
+
+    #: A full-screen (alternate-buffer) app -- vim, less, htop, screen, tmux --
+    #: has no learnable shell prompt and may repaint a status line/clock forever,
+    #: so the prompt-return fast path never fires and the quiescence fallback can
+    #: burn the whole SETTLE_MAX_WAIT. For these we treat a much shorter unchanged
+    #: window as "settled" and cap the total wait low, so injecting a keystroke
+    #: (e.g. a screen "Ctrl-a n") returns promptly instead of appearing to hang.
+    SETTLE_TUI_QUIET_WINDOW = 0.15
+    SETTLE_TUI_MAX_WAIT = 1.5
 
     #: Output token budget for the agent's replies. The provider default (1024)
     #: truncates longer answers mid-sentence, so the panel asks for more room.
@@ -1767,9 +1777,26 @@ class Relai:
         PTY into the model on its own thread while this worker-thread method
         sleeps between polls, so each snapshot reflects the latest output.
         """
-        quiet_window = self.SETTLE_QUIET_WINDOW
-        deadline = time.time() + self.SETTLE_MAX_WAIT
+        # A full-screen (alternate-buffer) app -- screen/tmux/vim/less/htop --
+        # has no learnable shell prompt, so the prompt-return fast path can never
+        # fire, and its status line/clock can keep repainting so the quiescence
+        # fallback (and the LLM check) would burn the whole timeout. Detect that
+        # case up front and use a short quiet window with a low overall cap, so an
+        # injected keystroke (e.g. a screen "Ctrl-a n") returns promptly instead
+        # of appearing to hang. Re-checked each poll because the app may enter or
+        # leave the alternate buffer as a result of the injected input.
+        tui = bool(getattr(self.screen, "in_alt_screen", False))
+        quiet_window = (
+            self.SETTLE_TUI_QUIET_WINDOW if tui else self.SETTLE_QUIET_WINDOW
+        )
+        max_wait = self.SETTLE_TUI_MAX_WAIT if tui else self.SETTLE_MAX_WAIT
+        deadline = time.time() + max_wait
         last_text = self._safe_snapshot() or ""
+        # The screen exactly as it was just before the input was injected. Passed
+        # to the LLM status check so it can compare before -> after and judge
+        # whether the injection actually took effect (not just whether the screen
+        # looks idle right now).
+        before_text = last_text
         last_change = time.time()
         changed_once = False
         while time.time() < deadline:
@@ -1782,15 +1809,33 @@ class Relai:
                 last_text = text
                 last_change = now
                 changed_once = True
-            # Fast path: the learned prompt is back -> command finished.
-            if changed_once and self._prompt_returned(prompt_prefix):
+            # A full-screen app entered/left since the last poll -> re-derive the
+            # timing so we do not wait a shell-length window on a TUI (or vice
+            # versa), and shrink the deadline when switching into TUI mode.
+            now_tui = bool(getattr(self.screen, "in_alt_screen", False))
+            if now_tui != tui:
+                tui = now_tui
+                quiet_window = (
+                    self.SETTLE_TUI_QUIET_WINDOW
+                    if tui
+                    else self.SETTLE_QUIET_WINDOW
+                )
+                if tui:
+                    deadline = min(
+                        deadline, now + self.SETTLE_TUI_MAX_WAIT
+                    )
+            # Fast path: the learned prompt is back -> command finished. Only
+            # meaningful outside a full-screen app (a TUI has no shell prompt).
+            if changed_once and not tui and self._prompt_returned(prompt_prefix):
                 return text
-            # Fallback: a quiet screen with no prompt match. Be patient, then
-            # confirm with the LLM (if any) so we do not misjudge a pause.
+            # Quiescence fallback. In a TUI we trust a short unchanged window
+            # directly (no shell prompt to match, no LLM round-trip). Otherwise we
+            # are patient and confirm once with the LLM so we do not misjudge a
+            # pause in a long-running command.
             if changed_once and (now - last_change) >= quiet_window:
-                if self.llm is None:
+                if tui or self.llm is None:
                     return text
-                if self._injection_finished(injected, text):
+                if self._injection_finished(injected, text, before_text):
                     return text
                 last_change = now  # really still running; back off
                 quiet_window = min(quiet_window * 2, 2.0)
@@ -1803,8 +1848,17 @@ class Relai:
         except Exception:
             return None
 
-    def _injection_finished(self, injected: str, screen_text: str) -> bool:
-        """Out-of-band status check: does the injected input look done?
+    def _injection_finished(
+        self, injected: str, screen_text: str, before_text: str = ""
+    ) -> bool:
+        """Out-of-band status check: did the injected input take effect / finish?
+
+        The LLM is shown three things: the screen exactly BEFORE the input was
+        injected, the injected input itself, and the screen AFTER. Comparing
+        before -> after lets it judge whether the injection actually landed and
+        completed, rather than only guessing from whether the current screen
+        looks idle (which is ambiguous for a full-screen app that always looks
+        "busy", or a command whose output happens to resemble a prompt).
 
         This is a standalone LLM call that is deliberately NOT added to the
         conversation history -- it only decides whether to keep waiting. On any
@@ -1816,25 +1870,32 @@ class Relai:
             "role": "system",
             "content": (
                 "You monitor a terminal. Some keystrokes/command were just "
-                "injected into it. Given the injected input and the current "
-                "screen, decide whether that input has FINISHED taking effect "
-                "(output is complete and the terminal is idle / a shell prompt "
-                "is waiting for the next command) or is STILL RUNNING (output is "
-                "still being produced, a long-running command has not returned, "
-                "or the program is mid-operation). Reply with exactly one word: "
-                "DONE or RUNNING."
+                "injected into it. You are given the screen BEFORE the "
+                "injection, the injected input, and the screen AFTER. By "
+                "comparing before to after, decide whether that input has "
+                "FINISHED taking effect (the change it triggered is complete and "
+                "the terminal is now idle -- a shell prompt waits for the next "
+                "command, or a full-screen app has finished redrawing and is "
+                "waiting for input) or is STILL RUNNING (output is still being "
+                "produced, a long-running command has not returned, the screen "
+                "is mid-redraw, or the injected input has not visibly taken "
+                "effect yet). Reply with exactly one word: DONE or RUNNING."
             ),
         }
         user = {
             "role": "user",
             "content": (
                 f"Injected input (repr): {injected!r}\n\n"
-                "Current terminal screen:\n"
-                "--- BEGIN SCREEN ---\n"
+                "Terminal screen BEFORE the injection:\n"
+                "--- BEGIN BEFORE ---\n"
+                f"{before_text}\n"
+                "--- END BEFORE ---\n\n"
+                "Terminal screen AFTER (current):\n"
+                "--- BEGIN AFTER ---\n"
                 f"{screen_text}\n"
-                "--- END SCREEN ---\n\n"
-                "Has the injected input finished taking effect? Answer DONE or "
-                "RUNNING."
+                "--- END AFTER ---\n\n"
+                "Comparing before to after, has the injected input finished "
+                "taking effect? Answer DONE or RUNNING."
             ),
         }
         try:
