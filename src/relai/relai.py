@@ -1079,7 +1079,26 @@ class Relai:
             "writes auto-save a .relai.bak, and a .py edit that breaks syntax "
             "returns exit=4 (error=py_syntax) so failures are explicit.)\n\n"
             + RELAI_HELPERS_DOC
+            + self._load_self_md()
         )
+
+    def _load_self_md(self) -> str:
+        """Load persistent self-notes from ~/.relai/SELF.md if present.
+
+        Returns "" when the file is missing, unreadable, or empty, so the
+        system-prompt builder never breaks. The content is length-capped and
+        prefixed with a header before being appended to the prompt.
+        """
+        path = os.path.expanduser("~/.relai/SELF.md")
+        try:
+            with open(path, "r", encoding="utf-8") as f:
+                data = f.read()
+        except (OSError, UnicodeDecodeError):
+            return ""
+        data = data[:8192]
+        if not data.strip():
+            return ""
+        return "\n\n## Persistent self-notes (from ~/.relai/SELF.md)\n" + data
 
     def _llm_tools(self) -> list[ToolSpec]:
         """Tools advertised to the model for this session."""
