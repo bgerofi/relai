@@ -1068,6 +1068,12 @@ class Relai:
             "the shell/escape/quoting corruption that ad-hoc 'python3 -c' or "
             "heredoc edits suffer from. Do NOT hand-roll multi-layer quoted "
             "scripts to edit a file when a helper can do it in one call.\n\n"
+            "(relai_helper v0.2.0+ adds safer edits: 'replace --expect-count N' "
+            "fails without writing if the match count differs; '--dry-run' on "
+            "replace/write returns a unified diff instead of writing; "
+            "'replace-range --start N --end M --b64 DATA' swaps a line range; "
+            "writes auto-save a .relai.bak, and a .py edit that breaks syntax "
+            "returns exit=4 (error=py_syntax) so failures are explicit.)\n\n"
             + RELAI_HELPERS_DOC
         )
 

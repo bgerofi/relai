@@ -183,7 +183,7 @@ outside your repositories (in `~/.relai/`) so it never shows up in
 The agent does not call helpers directly the way it calls a tool; it *runs*
 them by typing a shell command through `inject_input`. `relai_helper` exposes
 subcommands for the file operations that are awkward to do safely over a raw
-terminal — `read`, `write`, `append`, `replace`, `search`, and `run`. Every
+terminal — `read`, `write`, `append`, `replace`, `replace-range`, `search`, and `run` (with `--dry-run`, `--expect-count`, auto-backup, and a py-check that returns `exit=4` on broken `.py`). Every
 content payload is passed as base64 and every result is sentinel-framed with a
 real exit code, so edits are immune to quoting, newline, and escape corruption,
 and success is read from a reliable status rather than guessed from screen text.
