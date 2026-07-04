@@ -248,7 +248,7 @@ are full terminal-emulator replacements — the thing relai deliberately is *not
 | Dimension | RelAI | Butterfish | TmuxAI | AIShell | Headless drivers |
 |---|:---:|:---:|:---:|:---:|:---:|
 | In-band, human-driven | ✅ | ✅ | ✅ | ✅ | ✗ |
-| Full terminal- & program-indepence (i.e., nothing to modify) | ✅ | ✗ (its shell) | ✗ (tmux) | ✗ (its shell) | ✗ (launches the program) |
+| Full terminal- & program-indepence (i.e., nothing to modify) | ✅ | ✗ (its shell) | ✗ (tmux) | ✗ (its shell) | ✗ (program reachable only through their API/CLI) |
 | Works at the raw PTY layer (no shell/tmux/emulator dependency) | ✅ | shell-wrapper | needs tmux | shell-wrapper | spawns its own PTY |
 | Reasons about the rendered screen **and** scrollback (not just shell history) | ✅ | ✗ | ✅ | partial | ✅ |
 | Drives arbitrary full-screen TUIs (`vim`, `htop`, `claude`) | ✅ | ✗ | ✅ | ✗ | ✅ |
