@@ -31,6 +31,7 @@ Two optional settings tune request behaviour (env or ``~/.relai/llm.conf``):
 from __future__ import annotations
 
 import os
+import random
 import time
 from dataclasses import dataclass, field
 from typing import Any, Callable, Sequence
@@ -248,6 +249,60 @@ def _is_retryable(exc: BaseException) -> bool:
     return isinstance(status, int) and status in _RETRYABLE_STATUS
 
 
+def _is_rate_limit(exc: BaseException) -> bool:
+    """True if ``exc`` is a rate-limit failure (HTTP 429 / ``RateLimitError``)."""
+    if type(exc).__name__ == "RateLimitError":
+        return True
+    return getattr(exc, "status_code", None) == 429
+
+
+def _retry_after_seconds(exc: BaseException) -> float | None:
+    """Return the server-requested wait from a ``Retry-After`` response header.
+
+    Rate-limit (429) and some 503 responses tell the client exactly how long to
+    wait, either as an integer number of seconds or as an HTTP date. The SDKs
+    expose the raw response headers (``exc.response.headers``); we also accept a
+    plain ``retry_after`` attribute. Returns ``None`` when no usable value is
+    present, and clamps the result to a sane [0, 300]s range.
+    """
+    raw = None
+    response = getattr(exc, "response", None)
+    headers = getattr(response, "headers", None)
+    if headers is not None:
+        try:
+            raw = headers.get("retry-after") or headers.get("Retry-After")
+        except Exception:
+            raw = None
+    if raw is None:
+        raw = getattr(exc, "retry_after", None)
+    if raw is None:
+        return None
+
+    # Numeric form: whole/fractional seconds.
+    try:
+        secs = float(raw)
+    except (TypeError, ValueError):
+        secs = None
+    if secs is None:
+        # HTTP-date form: parse and take the delta from now.
+        try:
+            from email.utils import parsedate_to_datetime
+
+            when = parsedate_to_datetime(str(raw))
+        except Exception:
+            return None
+        if when is None:
+            return None
+        import datetime as _dt
+
+        now = _dt.datetime.now(when.tzinfo) if when.tzinfo else _dt.datetime.now()
+        secs = (when - now).total_seconds()
+
+    if secs < 0:
+        secs = 0.0
+    return min(secs, 300.0)
+
+
 @dataclass(frozen=True)
 class ProviderConfig:
     """Resolved configuration for the selected provider."""
@@ -428,7 +483,9 @@ class LLMClient:
         """Run one provider API ``call``, retrying transient failures.
 
         Retries up to ``self.max_retries`` times on timeouts, dropped
-        connections, rate limits and 5xx responses, with exponential backoff.
+        connections, rate limits and 5xx responses, with exponential backoff
+        plus jitter. A server-sent ``Retry-After`` header (rate limits / some
+        503s) overrides the computed delay so we wait exactly as instructed.
         Before each retry the ``on_retry`` hook (if set) is called so the UI can
         report the wait. Non-retryable errors, and the final attempt's error,
         are wrapped in :class:`LLMError` with full diagnostics.
@@ -446,13 +503,33 @@ class LLMClient:
                             self.name, exc, elapsed, self.timeout
                         )
                     ) from exc
-                delay = min(0.5 * (2 ** (attempt - 1)), 8.0)
+                # Exponential backoff with jitter, but honor a server-sent
+                # Retry-After header when present (rate limits / some 503s tell
+                # us exactly how long to wait).
+                backoff = min(0.5 * (2 ** (attempt - 1)), 8.0)
+                delay = backoff + random.uniform(0.0, backoff / 2.0)
+                rate_limited = _is_rate_limit(exc)
+                retry_after = _retry_after_seconds(exc)
+                if retry_after is not None:
+                    delay = retry_after
                 if self.on_retry is not None:
-                    self.on_retry(
-                        f"{self.name} {what} failed "
-                        f"({type(exc).__name__} after {elapsed:.0f}s); "
-                        f"retrying {attempt}/{self.max_retries} in {delay:.0f}s"
-                    )
+                    if rate_limited:
+                        wait_note = (
+                            f"Retry-After {delay:.0f}s"
+                            if retry_after is not None
+                            else f"backing off {delay:.0f}s"
+                        )
+                        self.on_retry(
+                            f"{self.name} {what} rate limited "
+                            f"(HTTP 429 after {elapsed:.0f}s); waiting "
+                            f"{wait_note}, retry {attempt}/{self.max_retries}"
+                        )
+                    else:
+                        self.on_retry(
+                            f"{self.name} {what} failed "
+                            f"({type(exc).__name__} after {elapsed:.0f}s); "
+                            f"retrying {attempt}/{self.max_retries} in {delay:.0f}s"
+                        )
                 time.sleep(delay)
         # Unreachable (the loop always returns or raises), but keeps type
         # checkers happy about the function always returning a value.

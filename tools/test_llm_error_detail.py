@@ -20,8 +20,10 @@ from relai.llm import (
     LLMError,
     ProviderConfig,
     _describe_request_error,
+    _is_rate_limit,
     _is_retryable,
     _resolve_settings,
+    _retry_after_seconds,
     _root_cause,
 )
 
@@ -182,12 +184,128 @@ def test_resolve_settings():
     assert retries == DEFAULT_MAX_RETRIES
 
 
+def test_is_rate_limit():
+    class _RL(Exception):
+        pass
+
+    _RL.__name__ = "RateLimitError"
+    assert _is_rate_limit(_RL("slow down")) is True
+
+    class _Status(Exception):
+        status_code = 429
+
+    assert _is_rate_limit(_Status()) is True
+
+    class _Other(Exception):
+        status_code = 500
+
+    assert _is_rate_limit(_Other()) is False
+    assert _is_rate_limit(ValueError("nope")) is False
+
+
+def test_retry_after_numeric_and_attribute_and_none():
+    # Plain retry_after attribute (seconds).
+    class _Attr(Exception):
+        retry_after = 12
+
+    assert _retry_after_seconds(_Attr()) == 12.0
+
+    # Header on the response object (case-insensitive), clamped to <= 300.
+    class _Resp:
+        def __init__(self, headers):
+            self.headers = headers
+
+    class _WithHeaders(Exception):
+        def __init__(self, headers):
+            self.response = _Resp(headers)
+
+    assert _retry_after_seconds(_WithHeaders({"retry-after": "20"})) == 20.0
+    assert _retry_after_seconds(_WithHeaders({"Retry-After": "45"})) == 45.0
+    assert _retry_after_seconds(_WithHeaders({"retry-after": "9999"})) == 300.0
+
+    # No header / no attribute -> None.
+    assert _retry_after_seconds(ValueError("x")) is None
+    assert _retry_after_seconds(_WithHeaders({})) is None
+
+
+def test_retry_after_http_date():
+    import datetime
+    from email.utils import format_datetime
+
+    class _Resp:
+        def __init__(self, headers):
+            self.headers = headers
+
+    class _WithHeaders(Exception):
+        def __init__(self, headers):
+            self.response = _Resp(headers)
+
+    future = datetime.datetime.now(datetime.timezone.utc) + datetime.timedelta(
+        seconds=30
+    )
+    secs = _retry_after_seconds(
+        _WithHeaders({"retry-after": format_datetime(future)})
+    )
+    assert secs is not None
+    # Allow scheduling slack, but it should be near 30s and non-negative.
+    assert 20.0 <= secs <= 31.0
+
+    past = datetime.datetime.now(datetime.timezone.utc) - datetime.timedelta(
+        seconds=60
+    )
+    assert _retry_after_seconds(_WithHeaders({"retry-after": format_datetime(past)})) == 0.0
+
+
+def test_request_honors_retry_after_and_reports_rate_limit():
+    c = _client(max_retries=2)
+    notes = []
+    c.on_retry = notes.append
+
+    class _Resp:
+        headers = {"retry-after": "7"}
+
+    class _RateLimit(Exception):
+        status_code = 429
+        response = _Resp()
+
+    _RateLimit.__name__ = "RateLimitError"
+
+    calls = {"n": 0}
+
+    def flaky():
+        calls["n"] += 1
+        if calls["n"] < 2:
+            raise _RateLimit("too many requests")
+        return "ok"
+
+    import relai.llm as llm
+
+    slept = []
+    saved_sleep = llm.time.sleep
+    llm.time.sleep = slept.append
+    try:
+        assert c._request(flaky) == "ok"
+    finally:
+        llm.time.sleep = saved_sleep
+
+    # We honored Retry-After exactly (7s), not the exponential backoff.
+    assert slept == [7.0]
+    assert len(notes) == 1
+    assert "rate limited" in notes[0]
+    assert "HTTP 429" in notes[0]
+    assert "Retry-After 7s" in notes[0]
+
+
 def main():
     test_root_cause_walks_chain()
     test_describe_includes_timing_and_type()
     test_describe_qualifies_module_and_status_and_request_id()
     test_describe_surfaces_underlying_cause()
     test_is_retryable()
+    test_is_rate_limit()
+    test_retry_after_numeric_and_attribute_and_none()
+    test_retry_after_http_date()
+    test_request_honors_retry_after_and_reports_rate_limit()
     test_request_retries_then_succeeds()
     test_request_gives_up_after_retries()
     test_request_non_retryable_raises_immediately()

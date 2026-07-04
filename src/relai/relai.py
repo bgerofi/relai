@@ -1341,7 +1341,9 @@ class Relai:
         if panel is not None:
             def _on_retry(note: str) -> None:
                 panel.add_info(note)
-                panel.activity = "Retrying"
+                panel.activity = (
+                    "Rate limited" if "rate limited" in note else "Retrying"
+                )
             self.llm.on_retry = _on_retry
 
         # Compact the running context into a summary before it fills the model's
