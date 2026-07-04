@@ -205,10 +205,10 @@ modified.
 | **Lifetime** | Live for the process | Persist across sessions |
 | **Purpose** | The only way the agent acts at all | Make file read/edit/search reliable and corruption-proof |
 
-## Related work
+## Related projects
 
 Other projects put an AI agent near the terminal, but they fall into two camps
-that are each distinct from relai.
+that are each distinct from RelAI.
 
 **Headless drivers** — the *agent* spawns and owns a session and drives it
 programmatically; the human is out of the loop and reviews the result:
@@ -223,7 +223,7 @@ programmatically; the human is out of the loop and reviews the result:
   PTY sessions with VT100 emulation, snapshots, and detected UI elements.
 
 **In-band assistants** — a human drives and the AI rides along in the *live*
-session. These are the closest in spirit to relai:
+session:
 
 - [Butterfish](https://github.com/bakks/butterfish) (bakks) — the closest on UX.
   Wraps your shell in a PTY; you prompt inline (capital letter to ask, `!` for
@@ -242,9 +242,9 @@ Further out: [Warp](https://www.warp.dev/) and Microsoft's
 are full terminal-emulator replacements — the thing relai deliberately is *not*
 (see [What RelAI is not?](#what-relai-is-not)).
 
-### How relai compares
+### How RelAI compares
 
-| Dimension | relai | Butterfish | TmuxAI | AIShell | Headless drivers |
+| Dimension | RelAI | Butterfish | TmuxAI | AIShell | Headless drivers |
 |---|:---:|:---:|:---:|:---:|:---:|
 | In-band, human-driven | ✅ | ✅ | ✅ | ✅ | ✗ |
 | Works at the raw PTY layer (no shell/tmux/emulator dependency) | ✅ | shell-wrapper | needs tmux | shell-wrapper | spawns its own PTY |
@@ -253,8 +253,3 @@ are full terminal-emulator replacements — the thing relai deliberately is *not
 | Host-transparent across `ssh`/nested tmux, nothing installed remotely | ✅ | local shell | tmux-side | local | ✗ |
 | Resizable in-terminal agent panel + conversation sessions | ✅ | inline shell | chat pane | ✗ | N/A |
 | Agentic tool-calling loop | ✅ | ✅ | ✅ | ✗ | driven externally |
-
-Butterfish is the closest on UX and TmuxAI the closest in philosophy, but
-neither combines relai's three-way pitch: raw-PTY transparency with *no*
-shell/tmux/emulator dependency, screen-and-scrollback reasoning over *any*
-program, and traveling across `ssh` with nothing installed on the remote host.
