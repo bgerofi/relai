@@ -1,22 +1,20 @@
 # RelAI
 
 **relai** is an AI agent that sits transparently on the character stream between you
-and whatever terminal based program you run. The agent is always one keystroke away,
-no matter where you are running.
+and whatever terminal based program you run, no matter where you are running.
 
-Because **relai** operates at the pseudo-terminal (PTY) layer rather than inside any
-particular application, it integrates **seamlessly with any terminal and any
+**relai** operates at the pseudo-terminal (PTY) layer rather than inside any
+particular application, thus it integrates **seamlessly with any terminal and any
 program**: arbitrary shells, full-screen TUI apps (`htop`, `vim`, `claude`), and
 REPLs all work unchanged. There is nothing to configure per-app; if it runs in a
 terminal, relai can drive it.
 
-relai is also **host transparent**. It processes the PTY byte stream, so it
-travels with you across `ssh` hops and nested `tmux`/`screen` sessions, the
+relai is **host transparent**. It processes the PTY byte stream and it
+travels with you across `ssh` hops and nested `tmux`/`screen` sessions. The
 agent keeps working on the far side without any agent or API key installed on
 the remote host. Your session, wherever it goes, carries the agent along.
 
-You are in control by default, but once you summon the
-agent, it can:
+You are in control by default, but once you summon the agent, it can:
 
 - **Run commands** on your behalf (and read back their output).
 - **Control interactive applications** by sending real keystrokes, edit in
