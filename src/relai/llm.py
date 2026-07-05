@@ -375,6 +375,79 @@ def _getvar(conf: dict[str, str], name: str) -> str | None:
     return conf.get(name)
 
 
+def conf_path() -> str:
+    """Public path of the LLM config file (``~/.relai/llm.conf``)."""
+    return _conf_path()
+
+
+def write_provider_conf(
+    provider: str,
+    api_url: str,
+    api_key: str,
+    model: str,
+    path: str | None = None,
+) -> str:
+    """Persist a provider's settings to ``~/.relai/llm.conf`` and return the path.
+
+    Writes the three variables relai reads elsewhere --
+    ``{PREFIX}_API_URL`` / ``{PREFIX}_API_KEY`` / ``{PREFIX}_MODEL`` -- updating
+    any existing assignment of those keys in place and appending the rest,
+    while preserving every other line (comments, other providers, tuning vars).
+    The file holds an API key, so it is created (with ``~/.relai``) using
+    owner-only ``0600`` permissions.
+    """
+    if provider not in _ENV_PREFIX:
+        raise ValueError(f"unknown provider {provider!r}")
+    prefix = _ENV_PREFIX[provider]
+    updates = {
+        f"{prefix}_API_URL": api_url,
+        f"{prefix}_API_KEY": api_key,
+        f"{prefix}_MODEL": model,
+    }
+    if path is None:
+        path = _conf_path()
+
+    try:
+        with open(path, "r", encoding="utf-8") as fh:
+            lines = fh.read().splitlines()
+    except OSError:
+        lines = []
+
+    remaining = dict(updates)
+    out: list[str] = []
+    for raw in lines:
+        stripped = raw.strip()
+        key = None
+        if stripped and not stripped.startswith("#"):
+            body = (
+                stripped[len("export "):].lstrip()
+                if stripped.startswith("export ")
+                else stripped
+            )
+            k, sep, _ = body.partition("=")
+            if sep:
+                key = k.strip()
+        if key is not None and key in remaining:
+            out.append(f"{key}={remaining.pop(key)}")
+        else:
+            out.append(raw)
+    if remaining:
+        if out and out[-1].strip():
+            out.append("")
+        for k, v in remaining.items():
+            out.append(f"{k}={v}")
+
+    os.makedirs(os.path.dirname(path), exist_ok=True)
+    fd = os.open(path, os.O_WRONLY | os.O_CREAT | os.O_TRUNC, 0o600)
+    with os.fdopen(fd, "w", encoding="utf-8") as fh:
+        fh.write("\n".join(out) + "\n")
+    try:
+        os.chmod(path, 0o600)
+    except OSError:
+        pass
+    return path
+
+
 def _read_provider(name: str, conf: dict[str, str]) -> ProviderConfig | None:
     """Return a ProviderConfig if all three variables for ``name`` are set.
 
