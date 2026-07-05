@@ -12,7 +12,8 @@ REPLs all work unchanged. There is nothing to configure per-app; if it runs in a
 terminal, relai can drive it.
 
 relai is **host transparent**, it processes the PTY byte stream and it
-travels with you across `ssh` hops and nested `tmux`/`screen` sessions. 
+travels with you across `ssh` hops, nested `tmux`/`screen` sessions,
+even interactive jobs of a supercomputer.
 It keeps working on the far side without any agent or API key installed
 on the remote host. Your session, wherever it goes, carries the agent along.
 
