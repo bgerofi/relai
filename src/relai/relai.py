@@ -266,9 +266,12 @@ class Relai:
         self._awaiting_command = False
         # AI panel state. ``_panel`` is non-None only while the split is open;
         # ``_panel_messages`` keeps the transcript alive across toggles.
+        # ``_panel_context_pct`` preserves the last context usage badge across
+        # toggles so re-opening the panel keeps showing it until the next turn.
         self._panel: AiPanel | None = None
         self._panel_closing = False
         self._panel_messages: list[tuple[str, str]] = []
+        self._panel_context_pct: float | None = None
         # Bracketed-paste accumulator for the panel input (paste bursts may span
         # several stdin reads and can embed newlines).
         self._panel_pasting = False
@@ -576,6 +579,7 @@ class Relai:
         self._ai_ask = ask
         self._panel = AiPanel(cols, height, provider)
         self._panel.restore(self._panel_messages)
+        self._panel.context_pct = self._panel_context_pct
         self._panel_closing = False
         self._panel_pasting = False
         self._panel_pastebuf = bytearray()
@@ -722,6 +726,7 @@ class Relai:
         rows, cols = self._phys_rows, self._phys_cols
         if self._panel is not None:
             self._panel_messages = self._panel.messages  # keep for next toggle
+            self._panel_context_pct = self._panel.context_pct
         self.screen.resize(rows, cols)
         _set_winsize(self._master_fd, rows, cols)
         self._compositor = None
@@ -1257,6 +1262,7 @@ class Relai:
         if panel is not None:
             panel.add_summary(summary)
             panel.context_pct = self._estimate_context_pct(summary)
+            self._panel_context_pct = panel.context_pct
             panel.activity = "Thinking"
         self._persist_session()
         return summary
@@ -1414,8 +1420,11 @@ class Relai:
                     on_text=_on_text,
                 )
                 self._llm_history.append(turn.assistant_message)
-                if self._panel is not None and turn.usage is not None:
-                    self._panel.context_pct = turn.usage.context_percent()
+                if turn.usage is not None:
+                    pct = turn.usage.context_percent()
+                    self._panel_context_pct = pct
+                    if self._panel is not None:
+                        self._panel.context_pct = pct
                 if not turn.tool_calls:
                     return turn.text
                 # Keep this request's streamed reasoning/commentary in the
