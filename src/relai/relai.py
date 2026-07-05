@@ -1306,6 +1306,7 @@ class Relai:
         if panel is None:
             return
         panel.thinking = False
+        panel.interim = ""
         deliver = self._deliver or self._deliver_reply
         deliver(self._ask_result)
         self._render_split()
@@ -1355,14 +1356,25 @@ class Relai:
         # back cleanly, leaving the history well-formed (no dangling tool_use).
         checkpoint = len(self._llm_history)
         self._llm_history.append({"role": "user", "content": user_content})
+
+        # Streamed narration: as the model produces text, show it live (dim)
+        # above the spinner so the user sees what it is doing. It is transient --
+        # each turn starts fresh and the final reply replaces it entirely.
+        def _on_text(text: str) -> None:
+            p = self._panel
+            if p is not None:
+                p.interim = text
+
         try:
             while True:
                 if panel is not None:
                     panel.activity = "Thinking"
+                    panel.interim = ""
                 turn = self.llm.converse(
                     [system, *self._llm_history],
                     tools=tools,
                     max_tokens=self.REPLY_MAX_TOKENS,
+                    on_text=_on_text,
                 )
                 self._llm_history.append(turn.assistant_message)
                 if self._panel is not None and turn.usage is not None:

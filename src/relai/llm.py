@@ -574,14 +574,22 @@ class LLMClient:
         messages: Sequence[Message],
         tools: Sequence[ToolSpec] | None = None,
         max_tokens: int = 1024,
+        on_text: Callable[[str], None] | None = None,
     ) -> Turn:
         """One round-trip that may request tool calls.
 
         The default implementation has no tool support: it just wraps
         :meth:`complete` as a text-only turn. Providers that support tools
         override this.
+
+        ``on_text``, when given, is a progress hook fed the assistant's answer
+        text as it is produced so the UI can show the model's narration live.
+        Providers that stream call it repeatedly with the accumulated text; this
+        text-only default has no stream, so it fires once with the final text.
         """
         text = self.complete(messages, max_tokens=max_tokens)
+        if on_text is not None and text:
+            on_text(text)
         return Turn(
             text=text,
             assistant_message={"role": "assistant", "content": text},
@@ -721,6 +729,7 @@ class AnthropicClient(LLMClient):
         messages: Sequence[Message],
         tools: Sequence[ToolSpec] | None = None,
         max_tokens: int = 1024,
+        on_text: Callable[[str], None] | None = None,
     ) -> Turn:
         system_parts = [m["content"] for m in messages if m.get("role") == "system"]
         turns = [m for m in messages if m.get("role") != "system"]
@@ -740,7 +749,26 @@ class AnthropicClient(LLMClient):
                 }
                 for t in tools
             ]
-        resp = self._request(lambda: self._client.messages.create(**kwargs))
+        if on_text is None:
+            resp = self._request(lambda: self._client.messages.create(**kwargs))
+            return self._turn_from_message(resp)
+
+        # Streaming path: emit the assistant's text deltas as they arrive so the
+        # UI can show the model's narration live, then assemble the final message
+        # (which also carries any tool_use blocks and the usage totals).
+        def _stream() -> Any:
+            acc: list[str] = []
+            with self._client.messages.stream(**kwargs) as stream:
+                for delta in stream.text_stream:
+                    acc.append(delta)
+                    on_text("".join(acc))
+                return stream.get_final_message()
+
+        resp = self._request(_stream)
+        return self._turn_from_message(resp)
+
+    def _turn_from_message(self, resp: Any) -> Turn:
+        """Build a :class:`Turn` from an Anthropic message (create or stream)."""
         try:
             text_parts: list[str] = []
             blocks: list[dict] = []

@@ -40,6 +40,11 @@ class AiPanel:
         self.tick = 0  # advances while thinking, drives the spinner animation
         self.scroll = 0  # rows scrolled up from the bottom of the transcript
         self._messages: list[tuple[str, str]] = []
+        # Live, transient narration streamed from the model during a turn. Shown
+        # dim just above the spinner while ``thinking`` and cleared once the turn
+        # completes (the final reply replaces it). Never persisted or part of the
+        # saved transcript.
+        self.interim = ""
         # Percent of the context window used by the last request (None = unknown).
         self.context_pct: float | None = None
 
@@ -179,6 +184,10 @@ class AiPanel:
                 for para in logical:
                     for seg in _wrap(para, self.cols):
                         lines.append(seg.encode("utf-8", "replace") + _RESET + _EOL)
+        if self.interim:
+            for para in self.interim.split("\n"):
+                for seg in _wrap(para, self.cols):
+                    lines.append(_DIM + seg.encode("utf-8", "replace") + _RESET + _EOL)
         if self.thinking:
             dots = _THINK_FRAMES[self.tick % len(_THINK_FRAMES)]
             base = self.activity
