@@ -274,9 +274,12 @@ class Relai:
         self._panel_pasting = False
         self._panel_pastebuf = bytearray()
         self._compositor: Compositor | None = None
-        self._panel_height = 10
+        # Panel height in rows. 0 means "not yet sized": the panel defaults to
+        # half the screen height the first time it opens (see _open_panel). A
+        # user resize sets a concrete height that then persists across opens.
+        self._panel_height = 0
         # Height to restore when PageDown undoes a PageUp "half screen" resize.
-        self._panel_height_prev = 10
+        self._panel_height_prev = 0
         self._phys_rows = 0
         self._phys_cols = 0
         self._ai_ask = None
@@ -555,8 +558,14 @@ class Relai:
         if rows < 5 or cols < 10:
             return  # too small to usefully split
         self._phys_rows, self._phys_cols = rows, cols
+        # Default the panel to half the screen height on first open; a height the
+        # user has chosen (via resize) persists and is kept on later opens.
+        if self._panel_height <= 0:
+            self._panel_height = max(3, rows // 2)
         height = max(3, min(self._panel_height, rows - 2))
         self._panel_height = height
+        if self._panel_height_prev <= 0:
+            self._panel_height_prev = height
 
         # A fresh conversation is started the first time the panel opens in this
         # process; later opens keep extending the same session file.

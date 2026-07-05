@@ -1,5 +1,6 @@
-"""End-to-end: verify Ctrl-G PageUp resizes the AI panel to half the screen and
-Ctrl-G PageDown restores the original height.
+"""End-to-end: verify the AI panel opens at half the screen height by default,
+Ctrl-G PageUp resizes it to half the screen, and Ctrl-G PageDown restores the
+previous height.
 
 Run:
     cd /local_home/bgerofi1/src/relai && source .venv/bin/activate \
@@ -13,6 +14,7 @@ ROWS, COLS = 24, 90
 PREFIX = b"\x07"      # Ctrl-G
 PGUP = b"\x1b[5~"
 PGDN = b"\x1b[6~"
+DOWN = b"\x1b[B"      # Ctrl-G Down -> shrink panel by one row
 
 
 def pump(fd, stream, seconds):
@@ -56,9 +58,16 @@ def main():
     stream = pyte.ByteStream(screen)
 
     pump(m, stream, 6)
-    os.write(m, b"\x0f")  # open panel
+    os.write(m, b"\x0f")  # open panel (defaults to half the screen height)
     pump(m, stream, 2)
 
+    default = panel_height(screen)  # new default: half the screen
+
+    # Shrink several rows so the half-resize and restore are observable (the
+    # panel already opens at half, so PageUp from there would be a no-op).
+    for _ in range(4):
+        os.write(m, PREFIX + DOWN)  # Ctrl-G Down -> shrink by 1
+        pump(m, stream, 0.4)
     original = panel_height(screen)
 
     os.write(m, PREFIX + PGUP)  # -> half screen
@@ -69,10 +78,14 @@ def main():
     pump(m, stream, 1.5)
     restored = panel_height(screen)
 
-    print(f"original={original} half={half} restored={restored}  (rows={ROWS})")
+    print(
+        f"default={default} original={original} half={half} "
+        f"restored={restored}  (rows={ROWS})"
+    )
     expect_half = ROWS // 2
     ok = (
-        original == 10
+        default == expect_half
+        and original == expect_half - 4
         and half == expect_half
         and restored == original
     )
