@@ -55,6 +55,16 @@ Requires [uv](https://docs.astral.sh/uv/).
 source .venv/bin/activate
 ```
 
+`setup.sh` creates a local `.venv`, installs relai, and also installs the
+optional **LiteLLM gateway** (`litellm[proxy]`) that enables the **GitHub
+Copilot** backend. relai works with the other providers even if that step is
+skipped.
+
+The first time you run `relai` without a configured provider, it walks you
+through a short **interactive setup** that saves your choice to
+`~/.relai/llm.conf` — see [LLM configuration](#llm-configuration) below. Use
+`--no-llm` to skip it and run as a plain relay.
+
 ## Usage
 
 ```bash
@@ -94,6 +104,30 @@ Change the prefix with `--prefix` (e.g. `relai --prefix ctrl-o`).
 
 ## LLM configuration
 
+### First-run setup wizard
+
+The first time you start relai without a provider configured, it runs a short
+interactive wizard (when stdin/stdout are a TTY) and saves your answers to
+`~/.relai/llm.conf`, so you only do this once:
+
+```
+Select the API endpoint type:
+  1) OpenAI
+  2) Anthropic
+  3) Google
+  4) Custom (OpenAI-compatible)
+  5) GitHub Copilot (via local LiteLLM gateway)
+```
+
+For providers 1–4 it asks for the endpoint URL, API key (hidden), and model
+name. Option 5 (GitHub Copilot) runs GitHub's device-flow authorization and then
+lets you pick from the models your account can use — see
+[GitHub Copilot](#github-copilot-via-litellm) below. Press Ctrl-C to skip the
+wizard and run as a plain relay; you can re-run it later, or configure things
+manually as described next.
+
+### Providers
+
 relai selects an LLM provider from a triplet of variables. Set the three
 variables for one provider:
 
@@ -112,12 +146,17 @@ invocation.
 
 The **custom** provider speaks the OpenAI-compatible API, so it works with local
 servers (LM Studio, llama.cpp, vLLM, Ollama's OpenAI shim) and gateways. Google
-uses the Gemini (`google-genai`) SDK. If more than one provider is fully
-configured, the precedence is custom > google > anthropic > openai.
+uses the Gemini (`google-genai`) SDK. **GitHub Copilot** is supported through a
+local LiteLLM gateway (below) and is selected via `COPILOT_MODEL`.
+
+If more than one provider is fully configured, the precedence is
+custom > google > anthropic > openai, and a configured direct provider always
+takes precedence over the GitHub Copilot gateway.
 
 At startup relai makes a minimal request to verify the provider is reachable. If
-no provider is configured, relai runs as a plain relay. Use `--no-llm` to skip
-LLM setup entirely.
+no provider is configured (and the wizard is skipped or non-interactive), relai
+runs as a plain relay. Use `--no-llm` to skip LLM setup entirely.
+
 
 ```bash
 # Example: OpenAI, via the environment
@@ -136,6 +175,38 @@ OPENAI_API_URL=https://api.openai.com/v1
 OPENAI_API_KEY=sk-...
 OPENAI_MODEL=gpt-4o
 ```
+
+### GitHub Copilot (via LiteLLM)
+
+relai can use **GitHub Copilot** as an OpenAI-compatible backend by spawning a
+local [LiteLLM](https://github.com/BerriAI/litellm) proxy that fronts LiteLLM's
+`github_copilot/` provider. relai then talks to that proxy with its normal
+OpenAI-compatible client — no endpoint URL or API key to manage.
+
+Requirements and behavior:
+
+- An **active paid GitHub Copilot subscription**.
+- The gateway (`litellm[proxy]`) must be installed — `setup.sh` does this, or
+  run `uv pip install 'litellm[proxy]'`.
+- Authorization uses **GitHub's OAuth device flow**: relai prints a URL and a
+  one-time code; you open the URL, enter the code, and approve access. The
+  credentials are cached under `~/.config/litellm/github_copilot` and reused on
+  later runs, so the gateway starts non-interactively afterwards. (This uses
+  GitHub's own OAuth, not `~/.netrc`.)
+
+The easiest way to set this up is the first-run wizard (option 5), which runs the
+device flow and lists the models your account can use (Copilot uses its own model
+ids, e.g. `gpt-4o`, `claude-opus-4.8`). Only the chosen model is stored:
+
+```ini
+# ~/.relai/llm.conf
+COPILOT_MODEL=gpt-4o
+```
+
+At startup, when no direct provider is configured but `COPILOT_MODEL` is set,
+relai authorizes (if needed), spawns the local LiteLLM gateway on loopback, and
+points its OpenAI-compatible client at it. The gateway is shut down when relai
+exits.
 
 ### Timeouts and retries
 
