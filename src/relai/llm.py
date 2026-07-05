@@ -30,6 +30,7 @@ Two optional settings tune request behaviour (env or ``~/.relai/llm.conf``):
 
 from __future__ import annotations
 
+import json
 import os
 import random
 import time
@@ -399,11 +400,32 @@ def write_provider_conf(
     if provider not in _ENV_PREFIX:
         raise ValueError(f"unknown provider {provider!r}")
     prefix = _ENV_PREFIX[provider]
-    updates = {
-        f"{prefix}_API_URL": api_url,
-        f"{prefix}_API_KEY": api_key,
-        f"{prefix}_MODEL": model,
-    }
+    return _write_conf_vars(
+        {
+            f"{prefix}_API_URL": api_url,
+            f"{prefix}_API_KEY": api_key,
+            f"{prefix}_MODEL": model,
+        },
+        path,
+    )
+
+
+def write_copilot_conf(model: str, path: str | None = None) -> str:
+    """Persist the GitHub Copilot gateway model to ``~/.relai/llm.conf``.
+
+    Stores just ``COPILOT_MODEL``; the endpoint URL and key are supplied at
+    runtime by the locally spawned LiteLLM gateway, so they are not written.
+    """
+    return _write_conf_vars({"COPILOT_MODEL": model}, path)
+
+
+def _write_conf_vars(updates: dict[str, str], path: str | None) -> str:
+    """Update ``KEY=VALUE`` assignments in ``~/.relai/llm.conf``, return the path.
+
+    Existing assignments of the given keys are replaced in place; any that are
+    missing are appended. Every other line is preserved. The file may hold an
+    API key, so it is created (with ``~/.relai``) using ``0600`` permissions.
+    """
     if path is None:
         path = _conf_path()
 
@@ -446,6 +468,37 @@ def write_provider_conf(
     except OSError:
         pass
     return path
+
+
+def copilot_model() -> str | None:
+    """The GitHub Copilot model to route through the LiteLLM gateway, if set.
+
+    Read from ``COPILOT_MODEL`` in the environment or ``~/.relai/llm.conf``.
+    """
+    return _getvar(_load_conf(), "COPILOT_MODEL")
+
+
+def copilot_provider_config(
+    api_url: str,
+    model: str,
+    api_key: str,
+    context_window: int | None = None,
+) -> ProviderConfig:
+    """Build an OpenAI-compatible :class:`ProviderConfig` for the local gateway.
+
+    ``model`` is the id the gateway exposes (e.g. ``github_copilot/gpt-4o``).
+    The context window defaults to the known size for that model family.
+    """
+    if context_window is None:
+        context_window = _known_context_window(model)
+    return ProviderConfig(
+        name="custom",
+        api_url=api_url.rstrip("/"),
+        api_key=api_key,
+        model=model,
+        context_window=context_window,
+    )
+
 
 
 def _read_provider(name: str, conf: dict[str, str]) -> ProviderConfig | None:
@@ -658,23 +711,67 @@ class LLMClient:
     ) -> Turn:
         """One round-trip that may request tool calls.
 
-        The default implementation has no tool support: it just wraps
-        :meth:`complete` as a text-only turn. Providers that support tools
-        override this.
+        This is a template method shared by every provider: it builds the
+        request (:meth:`_prepare_converse`), runs it -- streamed when an
+        ``on_text`` hook is given so the UI can show the model's narration live,
+        otherwise a single non-streamed call -- and records the usage. Providers
+        do not override ``converse``; they specialize the three hooks
+        (:meth:`_prepare_converse`, :meth:`_send_turn`, :meth:`_stream_turn`)
+        and :meth:`tool_result_message`.
 
-        ``on_text``, when given, is a progress hook fed the assistant's answer
-        text as it is produced so the UI can show the model's narration live.
-        Providers that stream call it repeatedly with the accumulated text; this
-        text-only default has no stream, so it fires once with the final text.
+        ``on_text``, when given, is fed the assistant's answer text as it is
+        produced (each call carries the full accumulated text so far).
         """
-        text = self.complete(messages, max_tokens=max_tokens)
-        if on_text is not None and text:
-            on_text(text)
+        request = self._prepare_converse(messages, tools, max_tokens)
+        if on_text is not None:
+            turn = self._request(lambda: self._stream_turn(request, on_text))
+        else:
+            turn = self._request(lambda: self._send_turn(request))
+        self._last_usage = turn.usage
+        return turn
+
+    def _prepare_converse(
+        self,
+        messages: Sequence[Message],
+        tools: Sequence[ToolSpec] | None,
+        max_tokens: int,
+    ) -> Any:
+        """Build the provider-native request payload for :meth:`converse`.
+
+        The default bundles the arguments for the :meth:`complete`-based
+        fallback used by clients that only implement :meth:`complete` (no tools,
+        no streaming). Providers override this together with :meth:`_send_turn`
+        / :meth:`_stream_turn`.
+        """
+        return {"messages": list(messages), "max_tokens": max_tokens}
+
+    def _send_turn(self, request: Any) -> Turn:
+        """Run one non-streamed request and return the assembled :class:`Turn`.
+
+        Called inside :meth:`_request`, so it should perform the raw provider
+        call without its own retry handling. The default has no tool support and
+        wraps :meth:`complete` as a text-only turn.
+        """
+        text = self.complete(request["messages"], max_tokens=request["max_tokens"])
         return Turn(
             text=text,
             assistant_message={"role": "assistant", "content": text},
             usage=self._last_usage,
         )
+
+    def _stream_turn(
+        self, request: Any, on_text: Callable[[str], None]
+    ) -> Turn:
+        """Run one streamed request, feeding accumulated text to ``on_text``.
+
+        Called inside :meth:`_request`. The default has no real stream: it makes
+        a single non-streamed request and emits the whole answer once. Providers
+        with server-side streaming override this.
+        """
+        turn = self._send_turn(request)
+        if turn.text:
+            on_text(turn.text)
+        return turn
 
     def tool_result_message(self, tool_call_id: str, content: str) -> Message:
         """Build the message that reports a tool's output back to the model."""
@@ -687,7 +784,10 @@ class LLMClient:
         context window was not pinned via ``*_CONTEXT_WINDOW``, it also tries to
         auto-detect the model's context window (never fatal).
         """
-        self.complete([{"role": "user", "content": "ping"}], max_tokens=1)
+        # 16 is the smallest cap some backends accept (e.g. GitHub Copilot's
+        # Codex/responses models reject anything below 16); keep the ping tiny
+        # but above that floor so the check works everywhere.
+        self.complete([{"role": "user", "content": "ping"}], max_tokens=16)
         if self.config.context_window <= 0 and self._detected_context_window <= 0:
             try:
                 self._detected_context_window = self.detect_context_window() or 0
@@ -750,6 +850,151 @@ class OpenAIClient(LLMClient):
         except (AttributeError, IndexError, TypeError) as exc:
             raise LLMError(f"unexpected response from {self.name}: {resp!r}") from exc
 
+    def _prepare_converse(
+        self,
+        messages: Sequence[Message],
+        tools: Sequence[ToolSpec] | None,
+        max_tokens: int,
+    ) -> Any:
+        kwargs: dict = {
+            "model": self.config.model,
+            "messages": list(messages),
+            "max_tokens": max_tokens,
+        }
+        if tools:
+            kwargs["tools"] = [
+                {
+                    "type": "function",
+                    "function": {
+                        "name": t.name,
+                        "description": t.description,
+                        "parameters": t.input_schema,
+                    },
+                }
+                for t in tools
+            ]
+        return kwargs
+
+    def _send_turn(self, request: Any) -> Turn:
+        resp = self._client.chat.completions.create(**request)
+        try:
+            msg = resp.choices[0].message
+        except (AttributeError, IndexError, TypeError) as exc:
+            raise LLMError(f"unexpected response from {self.name}: {resp!r}") from exc
+        calls: list[dict] = []
+        for raw in getattr(msg, "tool_calls", None) or []:
+            fn = getattr(raw, "function", None)
+            calls.append(
+                {
+                    "id": getattr(raw, "id", None) or f"call_{len(calls)}",
+                    "name": getattr(fn, "name", None) or "",
+                    "arguments": getattr(fn, "arguments", None) or "{}",
+                }
+            )
+        return self._openai_turn(
+            msg.content or "", calls, usage_from_response(resp, self.context_window)
+        )
+
+    def _stream_turn(
+        self, request: Any, on_text: Callable[[str], None]
+    ) -> Turn:
+        stream_req = dict(request)
+        stream_req["stream"] = True
+        stream_req["stream_options"] = {"include_usage": True}
+        parts: list[str] = []
+        slots: dict[int, dict] = {}
+        order: list[int] = []
+        usage: Usage | None = None
+        for chunk in self._client.chat.completions.create(**stream_req):
+            chunk_usage = usage_from_response(chunk, self.context_window)
+            if chunk_usage is not None:
+                usage = chunk_usage
+            choices = getattr(chunk, "choices", None) or []
+            if not choices:
+                continue
+            delta = getattr(choices[0], "delta", None)
+            if delta is None:
+                continue
+            piece = getattr(delta, "content", None)
+            if piece:
+                parts.append(piece)
+                on_text("".join(parts))
+            for tc in getattr(delta, "tool_calls", None) or []:
+                idx = getattr(tc, "index", 0) or 0
+                slot = slots.get(idx)
+                if slot is None:
+                    slot = {"id": "", "name": "", "arguments": ""}
+                    slots[idx] = slot
+                    order.append(idx)
+                tc_id = getattr(tc, "id", None)
+                if tc_id:
+                    slot["id"] = tc_id
+                fn = getattr(tc, "function", None)
+                if fn is not None:
+                    name = getattr(fn, "name", None)
+                    if name:
+                        slot["name"] = name
+                    args = getattr(fn, "arguments", None)
+                    if args:
+                        slot["arguments"] += args
+        calls = [
+            {
+                "id": slots[idx]["id"] or f"call_{i}",
+                "name": slots[idx]["name"],
+                "arguments": slots[idx]["arguments"] or "{}",
+            }
+            for i, idx in enumerate(order)
+        ]
+        return self._openai_turn("".join(parts), calls, usage)
+
+    def _openai_turn(
+        self, text: str, calls: Sequence[dict], usage: Usage | None
+    ) -> Turn:
+        """Assemble a :class:`Turn` from OpenAI text + accumulated tool calls.
+
+        ``calls`` items are ``{"id", "name", "arguments"}`` with ``arguments`` a
+        JSON string, matching both the non-streamed message and the pieces
+        accumulated from streamed deltas. The assistant turn is replayed
+        verbatim on the next request; OpenAI requires the same message (with its
+        ``tool_calls``) before the matching ``tool`` results.
+        """
+        tool_calls: list[ToolCall] = []
+        assistant_calls: list[dict] = []
+        for call in calls:
+            raw_args = call["arguments"] or "{}"
+            try:
+                parsed = json.loads(raw_args) if raw_args else {}
+            except (json.JSONDecodeError, TypeError):
+                parsed = {}
+            if not isinstance(parsed, dict):
+                parsed = {}
+            tool_calls.append(
+                ToolCall(id=call["id"], name=call["name"], input=parsed)
+            )
+            assistant_calls.append(
+                {
+                    "id": call["id"],
+                    "type": "function",
+                    "function": {"name": call["name"], "arguments": raw_args},
+                }
+            )
+        assistant_message: Message = {"role": "assistant", "content": text}
+        if assistant_calls:
+            assistant_message["tool_calls"] = assistant_calls
+        return Turn(
+            text=text,
+            tool_calls=tool_calls,
+            assistant_message=assistant_message,
+            usage=usage,
+        )
+
+    def tool_result_message(self, tool_call_id: str, content: str) -> Message:
+        return {
+            "role": "tool",
+            "tool_call_id": tool_call_id,
+            "content": content,
+        }
+
 
 class AnthropicClient(LLMClient):
     """Anthropic client via the ``anthropic`` SDK."""
@@ -804,13 +1049,12 @@ class AnthropicClient(LLMClient):
         except (AttributeError, TypeError) as exc:
             raise LLMError(f"unexpected response from {self.name}: {resp!r}") from exc
 
-    def converse(
+    def _prepare_converse(
         self,
         messages: Sequence[Message],
-        tools: Sequence[ToolSpec] | None = None,
-        max_tokens: int = 1024,
-        on_text: Callable[[str], None] | None = None,
-    ) -> Turn:
+        tools: Sequence[ToolSpec] | None,
+        max_tokens: int,
+    ) -> Any:
         system_parts = [m["content"] for m in messages if m.get("role") == "system"]
         turns = [m for m in messages if m.get("role") != "system"]
         kwargs: dict = {
@@ -829,22 +1073,24 @@ class AnthropicClient(LLMClient):
                 }
                 for t in tools
             ]
-        if on_text is None:
-            resp = self._request(lambda: self._client.messages.create(**kwargs))
-            return self._turn_from_message(resp)
+        return kwargs
 
-        # Streaming path: emit the assistant's text deltas as they arrive so the
-        # UI can show the model's narration live, then assemble the final message
-        # (which also carries any tool_use blocks and the usage totals).
-        def _stream() -> Any:
-            acc: list[str] = []
-            with self._client.messages.stream(**kwargs) as stream:
-                for delta in stream.text_stream:
-                    acc.append(delta)
-                    on_text("".join(acc))
-                return stream.get_final_message()
+    def _send_turn(self, request: Any) -> Turn:
+        resp = self._client.messages.create(**request)
+        return self._turn_from_message(resp)
 
-        resp = self._request(_stream)
+    def _stream_turn(
+        self, request: Any, on_text: Callable[[str], None]
+    ) -> Turn:
+        # Emit the assistant's text deltas as they arrive so the UI can show the
+        # model's narration live, then assemble the final message (which also
+        # carries any tool_use blocks and the usage totals).
+        acc: list[str] = []
+        with self._client.messages.stream(**request) as stream:
+            for delta in stream.text_stream:
+                acc.append(delta)
+                on_text("".join(acc))
+            resp = stream.get_final_message()
         return self._turn_from_message(resp)
 
     def _turn_from_message(self, resp: Any) -> Turn:
@@ -929,28 +1175,15 @@ class GoogleClient(LLMClient):
         return _first_positive_int(info, "input_token_limit")
 
     def complete(self, messages: Sequence[Message], max_tokens: int = 1024) -> str:
-        types = self._types
-        system_parts = [m["content"] for m in messages if m.get("role") == "system"]
-        contents = []
-        for m in messages:
-            role = m.get("role")
-            if role == "system":
-                continue
-            # Gemini uses "model" for assistant turns.
-            gemini_role = "model" if role == "assistant" else "user"
-            contents.append(
-                types.Content(role=gemini_role, parts=[types.Part(text=m["content"])])
-            )
-
-        config_kwargs: dict = {"max_output_tokens": max_tokens}
-        if system_parts:
-            config_kwargs["system_instruction"] = "\n\n".join(system_parts)
-
+        contents = [
+            self._message_to_content(m)
+            for m in messages
+            if m.get("role") != "system"
+        ]
+        config = self._build_config(messages, None, max_tokens)
         resp = self._request(
             lambda: self._client.models.generate_content(
-                model=self.config.model,
-                contents=contents,
-                config=types.GenerateContentConfig(**config_kwargs),
+                model=self.config.model, contents=contents, config=config
             )
         )
         try:
@@ -959,6 +1192,185 @@ class GoogleClient(LLMClient):
             raise LLMError(f"unexpected response from {self.name}: {resp!r}") from exc
         self._last_usage = usage_from_response(resp, self.context_window)
         return text or ""
+
+    def _message_to_content(self, m: Message) -> Any:
+        """Convert one history message into a Gemini ``Content``.
+
+        ``content`` is either plain text or a list of blocks (the shape our
+        assistant turns and tool results use): ``text`` -> text part,
+        ``function_call`` -> a model function-call part, ``function_response``
+        -> a user function-response part.
+        """
+        types = self._types
+        role = m.get("role")
+        # Gemini uses "model" for assistant turns; everything else (user turns
+        # and tool results) is "user".
+        gemini_role = "model" if role == "assistant" else "user"
+        content = m.get("content")
+        parts = []
+        if isinstance(content, str):
+            parts.append(types.Part(text=content))
+        else:
+            for block in content or []:
+                btype = block.get("type")
+                if btype == "function_call":
+                    parts.append(
+                        types.Part(
+                            function_call=types.FunctionCall(
+                                name=block.get("name", ""),
+                                args=block.get("args") or {},
+                            )
+                        )
+                    )
+                elif btype == "function_response":
+                    parts.append(
+                        types.Part(
+                            function_response=types.FunctionResponse(
+                                name=block.get("name", ""),
+                                response=block.get("response") or {},
+                            )
+                        )
+                    )
+                else:  # "text" (or anything unknown) -> text part
+                    parts.append(types.Part(text=block.get("text", "")))
+        return types.Content(role=gemini_role, parts=parts)
+
+    def _build_config(
+        self,
+        messages: Sequence[Message],
+        tools: Sequence[ToolSpec] | None,
+        max_tokens: int,
+    ) -> Any:
+        types = self._types
+        system_parts = [m["content"] for m in messages if m.get("role") == "system"]
+        config_kwargs: dict = {"max_output_tokens": max_tokens}
+        if system_parts:
+            config_kwargs["system_instruction"] = "\n\n".join(system_parts)
+        if tools:
+            config_kwargs["tools"] = [
+                types.Tool(
+                    function_declarations=[
+                        types.FunctionDeclaration(
+                            name=t.name,
+                            description=t.description,
+                            parameters_json_schema=t.input_schema or None,
+                        )
+                        for t in tools
+                    ]
+                )
+            ]
+        return types.GenerateContentConfig(**config_kwargs)
+
+    def _prepare_converse(
+        self,
+        messages: Sequence[Message],
+        tools: Sequence[ToolSpec] | None,
+        max_tokens: int,
+    ) -> Any:
+        contents = [
+            self._message_to_content(m)
+            for m in messages
+            if m.get("role") != "system"
+        ]
+        return {
+            "contents": contents,
+            "config": self._build_config(messages, tools, max_tokens),
+        }
+
+    def _send_turn(self, request: Any) -> Turn:
+        resp = self._client.models.generate_content(
+            model=self.config.model,
+            contents=request["contents"],
+            config=request["config"],
+        )
+        text_parts: list[str] = []
+        fcalls: list[Any] = []
+        for part in self._response_parts(resp):
+            fc = getattr(part, "function_call", None)
+            if fc is not None:
+                fcalls.append(fc)
+                continue
+            ptext = getattr(part, "text", None)
+            if ptext:
+                text_parts.append(ptext)
+        return self._google_turn(
+            "".join(text_parts), fcalls, usage_from_response(resp, self.context_window)
+        )
+
+    def _stream_turn(
+        self, request: Any, on_text: Callable[[str], None]
+    ) -> Turn:
+        text_parts: list[str] = []
+        fcalls: list[Any] = []
+        usage: Usage | None = None
+        for chunk in self._client.models.generate_content_stream(
+            model=self.config.model,
+            contents=request["contents"],
+            config=request["config"],
+        ):
+            chunk_usage = usage_from_response(chunk, self.context_window)
+            if chunk_usage is not None:
+                usage = chunk_usage
+            for part in self._response_parts(chunk):
+                fc = getattr(part, "function_call", None)
+                if fc is not None:
+                    fcalls.append(fc)
+                    continue
+                ptext = getattr(part, "text", None)
+                if ptext:
+                    text_parts.append(ptext)
+                    on_text("".join(text_parts))
+        return self._google_turn("".join(text_parts), fcalls, usage)
+
+    @staticmethod
+    def _response_parts(resp: Any) -> list:
+        candidates = getattr(resp, "candidates", None) or []
+        if not candidates:
+            return []
+        content = getattr(candidates[0], "content", None)
+        if content is None:
+            return []
+        return getattr(content, "parts", None) or []
+
+    def _google_turn(
+        self, text: str, fcalls: Sequence[Any], usage: Usage | None
+    ) -> Turn:
+        """Assemble a :class:`Turn` from Gemini text + function-call parts.
+
+        Gemini has no tool-call ids and matches a function response to its call
+        by name, so the ``ToolCall`` id is set to the function name (which
+        :meth:`tool_result_message` then echoes back).
+        """
+        blocks: list[dict] = []
+        if text:
+            blocks.append({"type": "text", "text": text})
+        tool_calls: list[ToolCall] = []
+        for fc in fcalls:
+            name = getattr(fc, "name", None) or ""
+            raw_args = getattr(fc, "args", None)
+            args = dict(raw_args) if raw_args else {}
+            blocks.append({"type": "function_call", "name": name, "args": args})
+            tool_calls.append(ToolCall(id=name, name=name, input=args))
+        return Turn(
+            text=text,
+            tool_calls=tool_calls,
+            assistant_message={"role": "assistant", "content": blocks},
+            usage=usage,
+        )
+
+    def tool_result_message(self, tool_call_id: str, content: str) -> Message:
+        # ``tool_call_id`` is the function name (see :meth:`_google_turn`);
+        # Gemini pairs a function response to its call by name.
+        return {
+            "role": "tool",
+            "content": [
+                {
+                    "type": "function_response",
+                    "name": tool_call_id,
+                    "response": {"result": content},
+                }
+            ],
+        }
 
 
 def _client_for(
@@ -1020,6 +1432,24 @@ def create_client(
             "variables for OPENAI, ANTHROPIC, GOOGLE, or CUSTOM (in the "
             "environment or in ~/.relai/llm.conf)"
         )
+    conf_timeout, conf_retries = _resolve_settings(_load_conf())
+    if timeout is None:
+        timeout = conf_timeout
+    if max_retries is None:
+        max_retries = conf_retries
+    return _client_for(config, timeout, max_retries)
+
+
+def build_client(
+    config: ProviderConfig,
+    timeout: float | None = None,
+    max_retries: int | None = None,
+) -> LLMClient:
+    """Build a client for an already-resolved ``config`` (e.g. the local gateway).
+
+    Request ``timeout`` / ``max_retries`` default to the values from
+    ``RELAI_LLM_TIMEOUT`` / ``RELAI_LLM_MAX_RETRIES`` (env or ``~/.relai/llm.conf``).
+    """
     conf_timeout, conf_retries = _resolve_settings(_load_conf())
     if timeout is None:
         timeout = conf_timeout

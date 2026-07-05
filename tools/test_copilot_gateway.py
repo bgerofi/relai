@@ -1,0 +1,205 @@
+"""Tests for the GitHub Copilot LiteLLM gateway integration.
+
+Covers the config helpers (``write_copilot_conf`` / ``copilot_model`` /
+``copilot_provider_config``) and the :class:`CopilotGateway` lifecycle. The
+gateway lifecycle is exercised against a tiny fake ``litellm`` CLI stub, so no
+real GitHub Copilot subscription or network access is required.
+
+Run:
+    cd /local_home/bgerofi1/src/relai && source .venv/bin/activate \
+        && python tools/test_copilot_gateway.py
+"""
+
+import os
+import stat
+import tempfile
+import textwrap
+import time
+import urllib.error
+import urllib.request
+
+from relai import gateway
+from relai.gateway import GATEWAY_API_KEY, CopilotGateway, GatewayError
+from relai.llm import _load_conf, copilot_provider_config, write_copilot_conf
+
+
+# A stand-in for the real `litellm` proxy: serves 200 on /health/liveliness so
+# the gateway's readiness poll succeeds, without any auth or model backend.
+_FAKE_SERVER = textwrap.dedent(
+    """\
+    #!{python}
+    import argparse
+    import http.server
+
+    p = argparse.ArgumentParser()
+    p.add_argument("--host")
+    p.add_argument("--port", type=int)
+    p.add_argument("--model")
+    args, _ = p.parse_known_args()
+
+    class H(http.server.BaseHTTPRequestHandler):
+        def do_GET(self):
+            if self.path == "/health/liveliness":
+                self.send_response(200)
+                self.end_headers()
+                self.wfile.write(b"I'm alive!")
+            else:
+                self.send_response(404)
+                self.end_headers()
+
+        def log_message(self, *a):
+            pass
+
+    http.server.HTTPServer((args.host, args.port), H).serve_forever()
+    """
+)
+
+# A stub that exits immediately, to exercise the "gateway died" error path.
+_FAKE_DEAD = textwrap.dedent(
+    """\
+    #!{python}
+    import sys
+    sys.exit(3)
+    """
+)
+
+
+def _make_cli(tmp, body):
+    import sys as _sys
+
+    path = os.path.join(tmp, "fake_litellm")
+    with open(path, "w", encoding="utf-8") as fh:
+        fh.write(body.format(python=_sys.executable))
+    os.chmod(path, 0o755)
+    return path
+
+
+def test_config_helpers(tmp):
+    path = os.path.join(tmp, "llm.conf")
+    write_copilot_conf("gpt-4o", path=path)
+    conf = _load_conf(path)
+    assert conf["COPILOT_MODEL"] == "gpt-4o"
+    mode = stat.S_IMODE(os.stat(path).st_mode)
+    assert mode == 0o600, oct(mode)
+
+    cfg = copilot_provider_config(
+        "http://127.0.0.1:4000/", "github_copilot/gpt-4o", GATEWAY_API_KEY
+    )
+    assert cfg.name == "custom"
+    assert cfg.api_url == "http://127.0.0.1:4000"  # trailing slash stripped
+    assert cfg.api_key == GATEWAY_API_KEY
+    assert cfg.model == "github_copilot/gpt-4o"
+    assert cfg.context_window == 128_000  # gpt-4o known window
+    print("config helpers: OK")
+
+
+def test_gateway_model_and_url(tmp):
+    gw = CopilotGateway("gpt-4o", port=12345)
+    assert gw.base_url == "http://127.0.0.1:12345"
+    assert gw.litellm_model == "github_copilot/gpt-4o"
+    print("gateway model/url: OK")
+
+
+def test_gateway_start_and_stop(tmp, monkeypatch_cli):
+    monkeypatch_cli(_make_cli(tmp, _FAKE_SERVER))
+    gw = CopilotGateway("gpt-4o", log_path=os.path.join(tmp, "gw.log"))
+    gw.start(timeout=15)
+    try:
+        with urllib.request.urlopen(
+            gw.base_url + "/health/liveliness", timeout=3
+        ) as resp:
+            assert resp.status == 200
+    finally:
+        gw.stop()
+    # After stop the process is gone and the port stops answering.
+    assert gw._proc is None
+    time.sleep(0.3)
+    try:
+        urllib.request.urlopen(gw.base_url + "/health/liveliness", timeout=1)
+        raise AssertionError("gateway still serving after stop()")
+    except (urllib.error.URLError, OSError):
+        pass
+    gw.stop()  # idempotent
+    print("gateway start/stop: OK")
+
+
+def test_gateway_start_failure(tmp, monkeypatch_cli):
+    monkeypatch_cli(_make_cli(tmp, _FAKE_DEAD))
+    gw = CopilotGateway("gpt-4o", log_path=os.path.join(tmp, "gw.log"))
+    try:
+        gw.start(timeout=10)
+    except GatewayError:
+        print("gateway start failure: OK")
+        return
+    finally:
+        gw.stop()
+    raise AssertionError("expected GatewayError when the gateway exits early")
+
+
+def test_missing_cli_raises(tmp, monkeypatch_cli):
+    monkeypatch_cli(None)
+    gw = CopilotGateway("gpt-4o", log_path=os.path.join(tmp, "gw.log"))
+    try:
+        gw.start(timeout=5)
+    except GatewayError:
+        print("missing CLI raises: OK")
+        return
+    raise AssertionError("expected GatewayError when litellm CLI is missing")
+
+
+def test_choose_copilot_model(tmp):
+    import builtins
+
+    from relai import __main__ as m
+
+    orig_list = gateway.list_copilot_models
+    orig_input = builtins.input
+    gateway.list_copilot_models = lambda: ["gpt-4o", "claude-opus-4.8", "gpt-5.5"]
+    try:
+        builtins.input = lambda *a: "2"  # by number
+        assert m._choose_copilot_model() == "claude-opus-4.8"
+        builtins.input = lambda *a: "gpt-5.5"  # by name
+        assert m._choose_copilot_model() == "gpt-5.5"
+        builtins.input = lambda *a: ""  # default (gpt-4o is present)
+        assert m._choose_copilot_model() == "gpt-4o"
+        builtins.input = lambda *a: "future-model"  # typed custom slug accepted
+        assert m._choose_copilot_model() == "future-model"
+        gateway.list_copilot_models = lambda: []  # listing failed -> free text
+        builtins.input = lambda *a: ""
+        assert m._choose_copilot_model("gpt-4o") == "gpt-4o"
+    finally:
+        gateway.list_copilot_models = orig_list
+        builtins.input = orig_input
+    print("choose copilot model: OK")
+
+
+def _run():
+    orig = gateway._litellm_cli
+    tests = [
+        test_config_helpers,
+        test_gateway_model_and_url,
+        test_gateway_start_and_stop,
+        test_gateway_start_failure,
+        test_missing_cli_raises,
+        test_choose_copilot_model,
+    ]
+    try:
+        for fn in tests:
+            with tempfile.TemporaryDirectory() as tmp:
+
+                def monkeypatch_cli(path):
+                    gateway._litellm_cli = lambda: path
+
+                argc = fn.__code__.co_argcount
+                if argc == 2:
+                    fn(tmp, monkeypatch_cli)
+                else:
+                    fn(tmp)
+                gateway._litellm_cli = orig
+    finally:
+        gateway._litellm_cli = orig
+    print("\nall test_copilot_gateway tests passed")
+
+
+if __name__ == "__main__":
+    _run()

@@ -1,0 +1,315 @@
+"""Tool calling + streaming across OpenAI and Google clients.
+
+The base :class:`LLMClient` drives ``converse`` as a template (prepare ->
+stream/send -> record usage); each provider only specializes the hooks. These
+tests exercise the OpenAI and Google specializations with fake SDK clients:
+
+  * tools are advertised in the provider-native shape,
+  * a tool call is parsed into a ``ToolCall`` and replayed verbatim,
+  * the follow-up ``tool_result_message`` uses the provider's role/format,
+  * streamed text deltas feed ``on_text`` and streamed tool-call deltas are
+    reassembled.
+"""
+
+import sys
+from pathlib import Path
+from types import SimpleNamespace
+
+sys.path.insert(0, str(Path(__file__).resolve().parents[1] / "src"))
+
+from relai.llm import (  # noqa: E402
+    GoogleClient,
+    OpenAIClient,
+    ProviderConfig,
+    ToolSpec,
+)
+
+
+def _ns(**kw):
+    return SimpleNamespace(**kw)
+
+
+_WEATHER = ToolSpec(
+    name="get_weather",
+    description="Get the current weather for a city.",
+    input_schema={
+        "type": "object",
+        "properties": {"city": {"type": "string"}},
+        "required": ["city"],
+    },
+)
+
+
+# -- OpenAI -----------------------------------------------------------------
+
+
+def _openai_client(handler):
+    client = OpenAIClient(
+        ProviderConfig(name="custom", api_url="http://x", api_key="k", model="m")
+    )
+    client._client = _ns(
+        chat=_ns(completions=_ns(create=lambda **kw: handler(kw)))
+    )
+    return client
+
+
+def test_openai_nonstream_tool_call():
+    captured = {}
+
+    def handler(kw):
+        captured["kw"] = kw
+        message = _ns(
+            content=None,
+            tool_calls=[
+                _ns(
+                    id="call_1",
+                    function=_ns(name="get_weather", arguments='{"city":"Paris"}'),
+                )
+            ],
+        )
+        return _ns(
+            choices=[_ns(message=message)],
+            usage=_ns(prompt_tokens=12, completion_tokens=4, total_tokens=16),
+        )
+
+    client = _openai_client(handler)
+    turn = client.converse(
+        [{"role": "user", "content": "weather in Paris?"}], tools=[_WEATHER]
+    )
+
+    # Tools advertised in OpenAI function shape.
+    tool = captured["kw"]["tools"][0]
+    assert tool["type"] == "function"
+    assert tool["function"]["name"] == "get_weather"
+    assert tool["function"]["parameters"]["required"] == ["city"]
+
+    assert len(turn.tool_calls) == 1
+    call = turn.tool_calls[0]
+    assert call.id == "call_1"
+    assert call.name == "get_weather"
+    assert call.input == {"city": "Paris"}
+
+    # Assistant turn is replayed verbatim with its tool_calls.
+    assert turn.assistant_message["tool_calls"][0]["id"] == "call_1"
+    assert (
+        turn.assistant_message["tool_calls"][0]["function"]["name"] == "get_weather"
+    )
+    assert turn.usage is not None and turn.usage.input_tokens == 12
+
+    # The tool result uses OpenAI's role="tool" pairing.
+    tr = client.tool_result_message("call_1", "Sunny, 22C")
+    assert tr == {"role": "tool", "tool_call_id": "call_1", "content": "Sunny, 22C"}
+    print("openai non-stream tool call: OK")
+
+
+def test_openai_stream_tool_call_and_text():
+    def handler(kw):
+        if not kw.get("stream"):
+            raise AssertionError("expected a streamed request")
+        # Tool-call arguments arrive split across chunks; the id/name land in
+        # the first delta only.
+        return iter(
+            [
+                _ns(
+                    choices=[
+                        _ns(
+                            delta=_ns(
+                                content="Let me ",
+                                tool_calls=None,
+                            )
+                        )
+                    ],
+                    usage=None,
+                ),
+                _ns(
+                    choices=[
+                        _ns(
+                            delta=_ns(
+                                content="check.",
+                                tool_calls=[
+                                    _ns(
+                                        index=0,
+                                        id="call_9",
+                                        function=_ns(
+                                            name="get_weather", arguments='{"ci'
+                                        ),
+                                    )
+                                ],
+                            )
+                        )
+                    ],
+                    usage=None,
+                ),
+                _ns(
+                    choices=[
+                        _ns(
+                            delta=_ns(
+                                content=None,
+                                tool_calls=[
+                                    _ns(
+                                        index=0,
+                                        id=None,
+                                        function=_ns(
+                                            name=None, arguments='ty":"Paris"}'
+                                        ),
+                                    )
+                                ],
+                            )
+                        )
+                    ],
+                    usage=None,
+                ),
+                _ns(
+                    choices=[],
+                    usage=_ns(prompt_tokens=20, completion_tokens=6, total_tokens=26),
+                ),
+            ]
+        )
+
+    client = _openai_client(handler)
+    seen = []
+    turn = client.converse(
+        [{"role": "user", "content": "weather?"}],
+        tools=[_WEATHER],
+        on_text=seen.append,
+    )
+
+    # Text deltas are streamed as accumulated snapshots.
+    assert seen == ["Let me ", "Let me check."], seen
+    assert turn.text == "Let me check."
+    # The split tool-call arguments are reassembled and parsed.
+    assert len(turn.tool_calls) == 1
+    assert turn.tool_calls[0].id == "call_9"
+    assert turn.tool_calls[0].input == {"city": "Paris"}
+    # Usage arrives on the final chunk.
+    assert turn.usage is not None and turn.usage.input_tokens == 20
+    print("openai stream tool call + text: OK")
+
+
+# -- Google -----------------------------------------------------------------
+
+
+def _google_client(models):
+    client = GoogleClient(
+        ProviderConfig(name="google", api_url="http://x", api_key="k", model="m")
+    )
+    client._client = _ns(models=models)
+    return client
+
+
+def test_google_nonstream_tool_call():
+    resp = _ns(
+        candidates=[
+            _ns(
+                content=_ns(
+                    parts=[
+                        _ns(function_call=_ns(name="get_weather", args={"city": "Paris"}), text=None),
+                    ]
+                )
+            )
+        ],
+        usage_metadata=_ns(
+            prompt_token_count=30, candidates_token_count=5, total_token_count=35
+        ),
+    )
+    captured = {}
+
+    def _generate(**kw):
+        captured["kw"] = kw
+        return resp
+
+    client = _google_client(_ns(generate_content=_generate))
+    turn = client.converse(
+        [
+            {"role": "system", "content": "sys"},
+            {"role": "user", "content": "weather in Paris?"},
+        ],
+        tools=[_WEATHER],
+    )
+
+    # Tools are advertised as Gemini function declarations.
+    cfg = captured["kw"]["config"]
+    decl = cfg.tools[0].function_declarations[0]
+    assert decl.name == "get_weather"
+
+    assert len(turn.tool_calls) == 1
+    call = turn.tool_calls[0]
+    # Gemini has no ids: the ToolCall id is the function name.
+    assert call.id == "get_weather"
+    assert call.name == "get_weather"
+    assert call.input == {"city": "Paris"}
+    # Assistant turn carries a replayable function_call block.
+    blocks = turn.assistant_message["content"]
+    assert {"type": "function_call", "name": "get_weather", "args": {"city": "Paris"}} in blocks
+    assert turn.usage is not None and turn.usage.input_tokens == 30
+    print("google non-stream tool call: OK")
+
+
+def test_google_tool_result_roundtrips_to_content():
+    client = _google_client(_ns())
+
+    # tool_result_message keys off the function name (the ToolCall id).
+    tr = client.tool_result_message("get_weather", "Sunny, 22C")
+    assert tr["role"] == "tool"
+    assert tr["content"][0]["name"] == "get_weather"
+
+    # A tool result converts to a user Content with a function_response part.
+    content = client._message_to_content(tr)
+    assert content.role == "user"
+    assert content.parts[0].function_response.name == "get_weather"
+    assert content.parts[0].function_response.response == {"result": "Sunny, 22C"}
+
+    # An assistant turn with text + function_call converts to a model Content.
+    assistant = {
+        "role": "assistant",
+        "content": [
+            {"type": "text", "text": "checking"},
+            {"type": "function_call", "name": "get_weather", "args": {"city": "Paris"}},
+        ],
+    }
+    c2 = client._message_to_content(assistant)
+    assert c2.role == "model"
+    assert c2.parts[0].text == "checking"
+    assert c2.parts[1].function_call.name == "get_weather"
+    print("google tool result round-trips to content: OK")
+
+
+def test_google_stream_text_deltas():
+    def _stream(**kw):
+        return iter(
+            [
+                _ns(
+                    candidates=[_ns(content=_ns(parts=[_ns(function_call=None, text="Hello ")]))],
+                    usage_metadata=None,
+                ),
+                _ns(
+                    candidates=[_ns(content=_ns(parts=[_ns(function_call=None, text="world")]))],
+                    usage_metadata=_ns(
+                        prompt_token_count=8, candidates_token_count=2, total_token_count=10
+                    ),
+                ),
+            ]
+        )
+
+    client = _google_client(_ns(generate_content_stream=_stream))
+    seen = []
+    turn = client.converse(
+        [{"role": "user", "content": "hi"}], on_text=seen.append
+    )
+    assert seen == ["Hello ", "Hello world"], seen
+    assert turn.text == "Hello world"
+    assert turn.usage is not None and turn.usage.input_tokens == 8
+    print("google stream text deltas: OK")
+
+
+def main():
+    test_openai_nonstream_tool_call()
+    test_openai_stream_tool_call_and_text()
+    test_google_nonstream_tool_call()
+    test_google_tool_result_roundtrips_to_content()
+    test_google_stream_text_deltas()
+    print("ALL provider tool-calling tests passed.")
+
+
+if __name__ == "__main__":
+    main()

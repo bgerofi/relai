@@ -55,7 +55,8 @@ def build(name, model, context_window=0):
 
 
 def test_known_table():
-    assert _known_context_window("claude-opus-4-6") == 200_000
+    assert _known_context_window("claude-opus-4-6") == 1_000_000  # Claude 4 = 1M
+    assert _known_context_window("claude-3-5-sonnet") == 200_000  # older = 200k
     assert _known_context_window("gpt-4o-mini") == 128_000
     assert _known_context_window("gpt-4-turbo-2024") == 128_000
     assert _known_context_window("gpt-4") == 8_192
@@ -97,7 +98,7 @@ def test_property_precedence():
     # 3. fallback table when nothing else is known
     c = build("anthropic", "claude-opus-4-6")
     assert c._detected_context_window == 0
-    assert c.context_window == 200_000
+    assert c.context_window == 1_000_000
 
     # 4. truly unknown -> 0 (badge hidden)
     c = build("openai", "mystery-x")
@@ -125,7 +126,7 @@ def test_anthropic_detect():
     # placeholder 0 from API -> 0 (property will then use the table)
     c._client = FakeSDK(FakeModels(result=Obj(max_input_tokens=0)))
     assert c.detect_context_window() == 0
-    assert c.context_window == 200_000  # table fallback
+    assert c.context_window == 1_000_000  # table fallback (Claude 4 = 1M)
     print("anthropic detect: OK")
 
 
