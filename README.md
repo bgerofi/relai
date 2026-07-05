@@ -51,6 +51,10 @@ the agent, it can:
   whatever terminal you already use (xterm, iTerm, Alacritty, ghostty, Windows Terminal,
   a `tmux`/`screen` pane, etc.), relaying the byte stream transparently.
   Your terminal, keybindings, and workflow stay exactly as they were.
+- RelAI is **not a shell modification**. It does not patch, wrap, or replace your
+  shell, and it is not tied to any particular one. It works with any shell and any
+  CLI tool: a database prompt, a code editor, a debugger, a REPL,
+  or whatever else you launch.
 
 
 ## Getting Started
