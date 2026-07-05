@@ -296,6 +296,39 @@ def test_request_honors_retry_after_and_reports_rate_limit():
     assert "Retry-After 7s" in notes[0]
 
 
+def test_google_rate_limit_recognized_with_retry_info():
+    # google-genai exposes the HTTP status as ``code`` (not ``status_code``)
+    # and puts the wait in a JSON ``RetryInfo`` detail, not a header.
+    class _GoogleError(Exception):
+        def __init__(self, code, details):
+            self.code = code
+            self.details = details
+
+    body = {
+        "error": {
+            "code": 429,
+            "status": "RESOURCE_EXHAUSTED",
+            "message": "quota exceeded",
+            "details": [
+                {"@type": "type.googleapis.com/google.rpc.Help", "links": []},
+                {
+                    "@type": "type.googleapis.com/google.rpc.RetryInfo",
+                    "retryDelay": "57.238747106s",
+                },
+            ],
+        }
+    }
+    exc = _GoogleError(429, body)
+    assert _is_retryable(exc) is True
+    assert _is_rate_limit(exc) is True
+    assert _retry_after_seconds(exc) == 57.238747106
+
+    # A non-retryable google error (400) is not retried and has no wait.
+    bad = _GoogleError(400, {"error": {"code": 400, "status": "INVALID_ARGUMENT"}})
+    assert _is_retryable(bad) is False
+    assert _retry_after_seconds(bad) is None
+
+
 def main():
     test_root_cause_walks_chain()
     test_describe_includes_timing_and_type()
@@ -306,6 +339,7 @@ def main():
     test_retry_after_numeric_and_attribute_and_none()
     test_retry_after_http_date()
     test_request_honors_retry_after_and_reports_rate_limit()
+    test_google_rate_limit_recognized_with_retry_info()
     test_request_retries_then_succeeds()
     test_request_gives_up_after_retries()
     test_request_non_retryable_raises_immediately()

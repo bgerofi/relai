@@ -128,6 +128,37 @@ def usage_from_response(resp: Any, context_window: int = 0) -> Usage | None:
     )
 
 
+def _reasoning_delta(delta: Any) -> str | None:
+    """Return a reasoning-text piece from a streamed OpenAI delta, if present.
+
+    Reasoning models expose their thinking outside the normal ``content``
+    stream. Different OpenAI-compatible servers name it differently, so check
+    the common fields (``reasoning_content`` / ``reasoning``) and any extra
+    field whose name mentions "reasoning". Returns ``None`` when there is no
+    (string) reasoning piece.
+    """
+    for attr in ("reasoning_content", "reasoning"):
+        val = getattr(delta, attr, None)
+        if isinstance(val, str) and val:
+            return val
+    extra = getattr(delta, "model_extra", None) or {}
+    for key, val in extra.items():
+        if "reasoning" in key and isinstance(val, str) and val:
+            return val
+    return None
+
+
+def _gemini_supports_thinking(model: str) -> bool:
+    """True if a Gemini model can return thought summaries (thinking).
+
+    Thinking (and ``include_thoughts``) is available on the 2.5 generation and
+    on 3.x; enabling it on older models (1.5 / 2.0) is rejected. Matching on the
+    generation keeps new ``-latest`` / dated variants working.
+    """
+    m = model.lower()
+    return "gemini-2.5" in m or "gemini-3" in m
+
+
 @dataclass(frozen=True)
 class ToolSpec:
     """A tool advertised to the model (name + JSON-schema for its input)."""
@@ -244,11 +275,25 @@ _RETRYABLE_TYPES = frozenset(
 _RETRYABLE_STATUS = frozenset({408, 409, 429, 500, 502, 503, 504})
 
 
+def _http_status(exc: BaseException) -> int | None:
+    """The HTTP status code carried by an SDK error, if any.
+
+    The openai / anthropic SDKs expose it as ``status_code``; the google-genai
+    SDK (``google.genai.errors.APIError``) exposes it as ``code``. Returns the
+    first integer found, else ``None``.
+    """
+    for attr in ("status_code", "code"):
+        val = getattr(exc, attr, None)
+        if isinstance(val, int):
+            return val
+    return None
+
+
 def _is_retryable(exc: BaseException) -> bool:
     """True if ``exc`` looks like a transient failure worth retrying."""
     if type(exc).__name__ in _RETRYABLE_TYPES:
         return True
-    status = getattr(exc, "status_code", None)
+    status = _http_status(exc)
     return isinstance(status, int) and status in _RETRYABLE_STATUS
 
 
@@ -256,7 +301,32 @@ def _is_rate_limit(exc: BaseException) -> bool:
     """True if ``exc`` is a rate-limit failure (HTTP 429 / ``RateLimitError``)."""
     if type(exc).__name__ == "RateLimitError":
         return True
-    return getattr(exc, "status_code", None) == 429
+    return _http_status(exc) == 429
+
+
+def _google_retry_delay(exc: BaseException) -> float | None:
+    """Server-requested wait from a google-genai ``RetryInfo`` error detail.
+
+    Gemini rate-limit (429) responses carry the wait not in a ``Retry-After``
+    header but in the JSON body: ``error.details[]`` contains a ``RetryInfo``
+    entry with ``retryDelay`` like ``"57s"``. Returns the seconds, or ``None``.
+    """
+    details = getattr(exc, "details", None)
+    error = details.get("error") if isinstance(details, dict) else None
+    items = error.get("details") if isinstance(error, dict) else None
+    if not isinstance(items, list):
+        return None
+    for item in items:
+        if not isinstance(item, dict):
+            continue
+        if str(item.get("@type", "")).endswith("RetryInfo"):
+            raw = item.get("retryDelay")
+            if isinstance(raw, str) and raw.endswith("s"):
+                try:
+                    return float(raw[:-1])
+                except ValueError:
+                    return None
+    return None
 
 
 def _retry_after_seconds(exc: BaseException) -> float | None:
@@ -265,8 +335,9 @@ def _retry_after_seconds(exc: BaseException) -> float | None:
     Rate-limit (429) and some 503 responses tell the client exactly how long to
     wait, either as an integer number of seconds or as an HTTP date. The SDKs
     expose the raw response headers (``exc.response.headers``); we also accept a
-    plain ``retry_after`` attribute. Returns ``None`` when no usable value is
-    present, and clamps the result to a sane [0, 300]s range.
+    plain ``retry_after`` attribute, and the google-genai ``RetryInfo`` body.
+    Returns ``None`` when no usable value is present, and clamps the result to a
+    sane [0, 300]s range.
     """
     raw = None
     response = getattr(exc, "response", None)
@@ -279,7 +350,9 @@ def _retry_after_seconds(exc: BaseException) -> float | None:
     if raw is None:
         raw = getattr(exc, "retry_after", None)
     if raw is None:
-        return None
+        # google-genai puts the wait in the JSON body, not a header.
+        secs = _google_retry_delay(exc)
+        return None if secs is None else min(max(secs, 0.0), 300.0)
 
     # Numeric form: whole/fractional seconds.
     try:
@@ -902,6 +975,7 @@ class OpenAIClient(LLMClient):
         stream_req["stream"] = True
         stream_req["stream_options"] = {"include_usage": True}
         parts: list[str] = []
+        reasoning: list[str] = []
         slots: dict[int, dict] = {}
         order: list[int] = []
         usage: Usage | None = None
@@ -915,6 +989,15 @@ class OpenAIClient(LLMClient):
             delta = getattr(choices[0], "delta", None)
             if delta is None:
                 continue
+            # Best-effort: some reasoning models stream their thinking in a
+            # separate ``reasoning_content`` field. Show it as narration while
+            # no answer text has arrived yet, but never fold it into the answer
+            # or the replayed assistant message.
+            think = _reasoning_delta(delta)
+            if think:
+                reasoning.append(think)
+                if not parts:
+                    on_text("".join(reasoning))
             piece = getattr(delta, "content", None)
             if piece:
                 parts.append(piece)
@@ -1246,6 +1329,13 @@ class GoogleClient(LLMClient):
         config_kwargs: dict = {"max_output_tokens": max_tokens}
         if system_parts:
             config_kwargs["system_instruction"] = "\n\n".join(system_parts)
+        # Ask Gemini to return its thought summaries so relai can show the
+        # model's reasoning live (as the transient "Thinking" narration). Only
+        # 2.5+ / 3.x models support this; enabling it on older ones errors.
+        if _gemini_supports_thinking(self.config.model):
+            config_kwargs["thinking_config"] = types.ThinkingConfig(
+                include_thoughts=True
+            )
         if tools:
             config_kwargs["tools"] = [
                 types.Tool(
@@ -1290,6 +1380,8 @@ class GoogleClient(LLMClient):
             if fc is not None:
                 fcalls.append(fc)
                 continue
+            if getattr(part, "thought", False):
+                continue  # reasoning summary, not the answer
             ptext = getattr(part, "text", None)
             if ptext:
                 text_parts.append(ptext)
@@ -1301,6 +1393,7 @@ class GoogleClient(LLMClient):
         self, request: Any, on_text: Callable[[str], None]
     ) -> Turn:
         text_parts: list[str] = []
+        reasoning: list[str] = []
         fcalls: list[Any] = []
         usage: Usage | None = None
         for chunk in self._client.models.generate_content_stream(
@@ -1317,9 +1410,18 @@ class GoogleClient(LLMClient):
                     fcalls.append(fc)
                     continue
                 ptext = getattr(part, "text", None)
-                if ptext:
-                    text_parts.append(ptext)
-                    on_text("".join(text_parts))
+                if not ptext:
+                    continue
+                # Gemini "thought summary" parts (when the model is configured
+                # to emit them) are narration, not the answer: show them while
+                # thinking but keep them out of the answer text.
+                if getattr(part, "thought", False):
+                    reasoning.append(ptext)
+                    if not text_parts:
+                        on_text("".join(reasoning))
+                    continue
+                text_parts.append(ptext)
+                on_text("".join(text_parts))
         return self._google_turn("".join(text_parts), fcalls, usage)
 
     @staticmethod

@@ -186,6 +186,53 @@ def test_openai_stream_tool_call_and_text():
     print("openai stream tool call + text: OK")
 
 
+def test_openai_stream_reasoning_narrated_not_in_answer():
+    def handler(kw):
+        if not kw.get("stream"):
+            raise AssertionError("expected a streamed request")
+        return iter(
+            [
+                _ns(
+                    choices=[
+                        _ns(delta=_ns(content=None, reasoning_content="Let me ", tool_calls=None))
+                    ],
+                    usage=None,
+                ),
+                _ns(
+                    choices=[
+                        _ns(delta=_ns(content=None, reasoning_content="think...", tool_calls=None))
+                    ],
+                    usage=None,
+                ),
+                _ns(
+                    choices=[
+                        _ns(delta=_ns(content="The answer", reasoning_content=None, tool_calls=None))
+                    ],
+                    usage=None,
+                ),
+                _ns(
+                    choices=[
+                        _ns(delta=_ns(content=" is 42.", reasoning_content=None, tool_calls=None))
+                    ],
+                    usage=_ns(prompt_tokens=5, completion_tokens=3, total_tokens=8),
+                ),
+            ]
+        )
+
+    client = _openai_client(handler)
+    seen = []
+    turn = client.converse([{"role": "user", "content": "q"}], on_text=seen.append)
+
+    # Reasoning is narrated first (while no answer text), then the answer text.
+    assert seen == ["Let me ", "Let me think...", "The answer", "The answer is 42."], seen
+    # The reasoning is NOT part of the answer or the replayed assistant message.
+    assert turn.text == "The answer is 42."
+    assert turn.assistant_message["content"] == "The answer is 42."
+    assert "think" not in turn.assistant_message["content"]
+    print("openai stream reasoning narrated (not in answer): OK")
+
+
+
 # -- Google -----------------------------------------------------------------
 
 
@@ -302,12 +349,54 @@ def test_google_stream_text_deltas():
     print("google stream text deltas: OK")
 
 
+def test_google_thinking_gate_and_thought_streaming():
+    from relai.llm import _gemini_supports_thinking
+
+    # Thinking (include_thoughts) is only enabled for 2.5+/3.x models.
+    assert _gemini_supports_thinking("gemini-2.5-flash")
+    assert _gemini_supports_thinking("gemini-3-pro-preview")
+    assert not _gemini_supports_thinking("gemini-2.0-flash")
+    assert not _gemini_supports_thinking("m")
+
+    # A streamed "thought" part is narrated (as reasoning) but kept out of the
+    # answer text; the following real text is the answer.
+    def _stream(**kw):
+        return iter(
+            [
+                _ns(
+                    candidates=[
+                        _ns(content=_ns(parts=[_ns(function_call=None, text="I am pondering", thought=True)]))
+                    ],
+                    usage_metadata=None,
+                ),
+                _ns(
+                    candidates=[
+                        _ns(content=_ns(parts=[_ns(function_call=None, text="42", thought=False)]))
+                    ],
+                    usage_metadata=_ns(
+                        prompt_token_count=4, candidates_token_count=1, total_token_count=5
+                    ),
+                ),
+            ]
+        )
+
+    client = _google_client(_ns(generate_content_stream=_stream))
+    seen = []
+    turn = client.converse([{"role": "user", "content": "q"}], on_text=seen.append)
+    assert seen == ["I am pondering", "42"], seen
+    assert turn.text == "42", turn.text
+    print("google thinking gate + thought streaming: OK")
+
+
+
 def main():
     test_openai_nonstream_tool_call()
     test_openai_stream_tool_call_and_text()
+    test_openai_stream_reasoning_narrated_not_in_answer()
     test_google_nonstream_tool_call()
     test_google_tool_result_roundtrips_to_content()
     test_google_stream_text_deltas()
+    test_google_thinking_gate_and_thought_streaming()
     print("ALL provider tool-calling tests passed.")
 
 
