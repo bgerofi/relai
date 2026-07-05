@@ -1,9 +1,10 @@
 # RelAI
 
-Are you tired of having to talk to your favorite LLM on a dedicated chat interface and copy
-commands into your terminal? Have you ever wanted an AI agent that would just pop out of
-nowhere and help you with anything you are working on? Have you had enough of setting up
-custom coding tools to help you with generic CLI tasks? Then you are at the right place.
+Are you tired of talking to your favorite LLM in a dedicated chat window and
+copying text back and forth between it and your terminal? Have you ever wished
+for an AI agent that could appear out of nowhere and help with whatever you're
+working on? Have you had enough of setting up custom coding tools just to handle
+everyday CLI tasks? Then you're in the right place.
 
 **relai** is an AI harness/agent that sits transparently on the character stream between
 you and any terminal-based program you're running, wherever you happen to
