@@ -13,7 +13,7 @@ terminal, relai can drive it.
 
 relai is **host transparent**, it processes the PTY byte stream and it
 travels with you across `ssh` hops, nested `tmux`/`screen` sessions,
-even interactive jobs of a supercomputer.
+even interactive jobs on a supercomputer.
 It keeps working on the far side without any agent or API key installed
 on the remote host. Your session, wherever it goes, carries the agent along.
 
@@ -24,8 +24,8 @@ You are in control by default, but once you summon the agent, it can:
   `vim`, page through `less`, drive a Python REPL, and so on.
 - **Focus on specific parts of the screen, including scrollback history**, so it
   can reason about exactly what you have been looking at.
-- Through enhanced **helpers** you can also acomplish more complex tasks, such as
-  coding or debugging, issue resolution and triaging, etc.
+- Through enhanced **[helpers](#assistant-helpers)** it can also acomplish more
+  complex tasks, such as coding or debugging, issue resolution or triaging, etc.
 
 ## What RelAI is not?
 
