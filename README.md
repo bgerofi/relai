@@ -19,8 +19,8 @@ terminal, relai can drive it.
 relai is **host transparent**, it processes the PTY byte stream and it
 travels with you across `ssh` hops, nested `tmux`/`screen` sessions,
 even interactive jobs on a supercomputer.
-It keeps working on the far side without any agent or API key installed
-on the remote host, or the usual proxy settings madness.
+It keeps working on the far side without needing any agent or API key installed
+on the remote host, or the right proxy settings configured.
 Your session, wherever it goes, carries the agent along.
 
 You are in control by default, **relai** does not disturb you, but once you summon
