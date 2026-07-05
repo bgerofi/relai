@@ -1201,20 +1201,22 @@ class Relai:
             return
         panel.add_system(result)
 
-    def _maybe_compact(self) -> None:
+    def _maybe_compact(self) -> bool:
         """Compact the model context into a summary if it is nearly full.
 
         Triggered when the last turn's prompt filled at least
         ``CONTEXT_COMPACT_PCT`` of the model's context window. A history that is
-        already just a fresh summary seed (<= 2 messages) is left alone.
+        already just a fresh summary seed (<= 2 messages) is left alone. Returns
+        ``True`` when it actually compacted, so callers can react (e.g. reset a
+        rollback checkpoint).
         """
         if self.llm is None or len(self._llm_history) <= 2:
-            return
+            return False
         panel = self._panel
         pct = panel.context_pct if panel is not None else None
         if pct is None or pct < self.CONTEXT_COMPACT_PCT:
-            return
-        self._compact_history()
+            return False
+        return self._compact_history() is not None
 
     def _compact_history(self) -> str | None:
         """Summarize the running conversation and reseed the context from it.
@@ -1295,7 +1297,7 @@ class Relai:
         if cw <= 0:
             return None
         approx_tokens = (len(summary) + 400) // 4
-        return max(0.0, min(100.0, 100.0 * approx_tokens / cw))
+        return max(0.0, 100.0 * approx_tokens / cw)
 
     def _finish_ask(self) -> None:
         """Deliver the completed background result into the panel."""
@@ -1367,6 +1369,15 @@ class Relai:
 
         try:
             while True:
+                # Compact before EVERY request, not just once per user ask: a
+                # single agentic turn can issue many tool round-trips, and each
+                # re-sends the whole history (screen snapshots + tool outputs),
+                # so the context grows within this loop. Checking only at the
+                # top let a long tool loop sail past the window without ever
+                # compacting. When it compacts, the history is replaced by a
+                # small summary seed, so move the rollback checkpoint with it.
+                if self._maybe_compact():
+                    checkpoint = len(self._llm_history)
                 if panel is not None:
                     panel.activity = "Thinking"
                     panel.interim = ""

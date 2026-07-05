@@ -28,11 +28,25 @@ def test_context_percent_unknown_window():
     print("context_percent unknown window: OK")
 
 
-def test_context_percent_clamped():
+def test_context_percent_over_100():
+    # When the prompt exceeds the window, the true overshoot is reported (not
+    # capped at 100) so the badge and auto-compaction see the real pressure.
     u = Usage(input_tokens=9000, output_tokens=0, total_tokens=9000,
               context_window=8000)
-    assert u.context_percent() == 100.0, u.context_percent()
-    print("context_percent clamped: OK")
+    assert u.context_percent() == 112.5, u.context_percent()
+    print("context_percent over 100: OK")
+
+
+def test_known_context_window_claude4_is_1m():
+    # The Claude 4 family (Opus 4.x / Sonnet 4.x) has a 1M window; older Claude
+    # models remain 200k. Prevents over-estimating usage on endpoints whose
+    # models API is not exposed (so relai must fall back to this table).
+    from relai.llm import _known_context_window
+    assert _known_context_window("claude-opus-4-8") == 1_000_000
+    assert _known_context_window("claude-sonnet-4-5") == 1_000_000
+    assert _known_context_window("claude-3-5-sonnet") == 200_000
+    assert _known_context_window("claude-3-opus") == 200_000
+    print("known context window claude4 is 1M: OK")
 
 
 def test_openai_shape():
@@ -184,7 +198,8 @@ def test_provider_config_context_window_default():
 if __name__ == "__main__":
     test_context_percent_basic()
     test_context_percent_unknown_window()
-    test_context_percent_clamped()
+    test_context_percent_over_100()
+    test_known_context_window_claude4_is_1m()
     test_openai_shape()
     test_anthropic_shape()
     test_google_shape()

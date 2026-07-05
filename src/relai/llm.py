@@ -67,13 +67,15 @@ class Usage:
         """Fraction of the context window consumed by the prompt, as a percent.
 
         Uses ``input_tokens`` (the prompt) against ``context_window``. Returns
-        ``None`` when the window size is unknown (0). Result is clamped to
-        [0, 100].
+        ``None`` when the window size is unknown (0). The result is *not* capped
+        at 100: when the prompt exceeds the window it reports the true
+        overshoot (e.g. 130%), so the badge and the auto-compaction trigger can
+        both see how far over budget the context really is.
         """
         if self.context_window <= 0:
             return None
         pct = 100.0 * self.input_tokens / self.context_window
-        return max(0.0, min(100.0, pct))
+        return max(0.0, pct)
 
 
 def _get(obj: Any, *names: str) -> int:
@@ -420,7 +422,12 @@ def resolve_config() -> ProviderConfig | None:
 # *_CONTEXT_WINDOW env var nor the provider API supplies one. Matched as a
 # case-insensitive substring of the model id, most specific entries first.
 _KNOWN_CONTEXT_WINDOWS: tuple[tuple[str, int], ...] = (
-    # Anthropic (normally auto-detected via max_input_tokens).
+    # Anthropic (normally auto-detected via max_input_tokens, but many gateway /
+    # proxy endpoints don't expose the models API, so these fallbacks matter).
+    # The Claude 4 family (Opus 4.x / Sonnet 4.x) supports a 1M-token window;
+    # older Claude models are 200k. Most specific entries must come first.
+    ("claude-opus-4", 1_000_000),
+    ("claude-sonnet-4", 1_000_000),
     ("claude", 200_000),
     # OpenAI (the standard API does not report context size).
     ("gpt-4.1", 1_047_576),
