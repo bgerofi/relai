@@ -9,10 +9,10 @@ program**: arbitrary shells, full-screen TUI apps (`htop`, `vim`, `claude`), and
 REPLs all work unchanged. There is nothing to configure per-app; if it runs in a
 terminal, relai can drive it.
 
-relai is **host transparent**. It processes the PTY byte stream and it
-travels with you across `ssh` hops and nested `tmux`/`screen` sessions. The
-agent keeps working on the far side without any agent or API key installed on
-the remote host. Your session, wherever it goes, carries the agent along.
+relai is **host transparent**, it processes the PTY byte stream and it
+travels with you across `ssh` hops and nested `tmux`/`screen` sessions. 
+**relai** keeps working on the far side without any agent or API key installed 
+on the remote host. Your session, wherever it goes, carries the agent along.
 
 You are in control by default, but once you summon the agent, it can:
 
