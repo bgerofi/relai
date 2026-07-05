@@ -65,44 +65,13 @@ through a short **interactive setup** that saves your choice to
 `~/.relai/llm.conf` — see [LLM configuration](#llm-configuration) below. Use
 `--no-llm` to skip it and run as a plain relay.
 
-## Usage
+## LLM configuration
+
+Once you are done with the installation you invoke RelAI simply by typing:
 
 ```bash
-relai            # spawns your $SHELL
-relai -- htop    # spawns any command (everything after -- is the command)
-relai -- ssh user@host
+relai
 ```
-
-Exit by exiting the spawned program (e.g. `exit` in the shell).
-
-### Summoning the agent
-
-Press **Ctrl-O** to open (or close) the AI panel — a bottom split where you type
-to the agent while your program keeps running above. Ctrl-O is used because
-`screen` (Ctrl-A) and `tmux` (Ctrl-B) leave it alone, so it works even inside
-nested sessions.
-
-Inside the panel:
-
-- Type your request and press **Enter** to send it; **Esc** or **Ctrl-O** closes
-  the panel. The input line is a full editor — arrow keys, Home/End, Ctrl-A/E,
-  Ctrl-U/K/W, and mouse (bracketed) paste all work.
-- **Up / Down** scroll the conversation; **PageUp / PageDown** scroll by a page.
-- **Ctrl-G Up / Down** grow or shrink the panel one row; **Ctrl-G PageUp** snaps
-  it to half the screen and **Ctrl-G PageDown** restores the previous height.
-
-### Prefix commands
-
-Press the prefix key (default **Ctrl-G**), then a command letter:
-
-- `Ctrl-G` `a` — open the AI panel (same as Ctrl-O)
-- `Ctrl-G` `s` — open the scrollback viewer
-- `Ctrl-G` `o` — send a literal Ctrl-O byte to the program underneath
-- `Ctrl-G` `Ctrl-G` — send a literal prefix byte to the program underneath
-
-Change the prefix with `--prefix` (e.g. `relai --prefix ctrl-o`).
-
-## LLM configuration
 
 ### First-run setup wizard
 
@@ -128,8 +97,10 @@ manually as described next.
 
 ### Providers
 
-relai selects an LLM provider from a triplet of variables. Set the three
-variables for one provider:
+If you'd rather not deal with the interactive
+step — or you want to override what it saved — you can configure a provider
+directly with a triplet of variables (URL, key, model), either as environment
+variables or in `~/.relai/llm.conf`. Set the three variables for one provider:
 
 | Provider  | URL                 | Key                 | Model             |
 |-----------|---------------------|---------------------|-------------------|
@@ -137,46 +108,24 @@ variables for one provider:
 | Anthropic | `ANTHROPIC_API_URL` | `ANTHROPIC_API_KEY` | `ANTHROPIC_MODEL` |
 | Google    | `GOOGLE_API_URL`    | `GOOGLE_API_KEY`    | `GOOGLE_MODEL`    |
 | Custom    | `CUSTOM_API_URL`    | `CUSTOM_API_KEY`    | `CUSTOM_MODEL`    |
+| Copilot   | *(set by LiteLLM)*  | *(set by LiteLLM)*  | `COPILOT_MODEL`   |
 
-These variables are read from the **environment** and, as a fallback, from a
-**`~/.relai/llm.conf`** file. This lets you keep your provider settings in one
-place instead of exporting them in every shell. Environment variables always
-take precedence over the file, so you can override any single value per
-invocation.
+Environment variables take precedence over the config file, so exporting a value
+overrides the wizard's saved settings for that invocation (handy for switching
+model per run). Configuring any provider this way also means the wizard won't run
+on startup.
 
 The **custom** provider speaks the OpenAI-compatible API, so it works with local
 servers (LM Studio, llama.cpp, vLLM, Ollama's OpenAI shim) and gateways. Google
-uses the Gemini (`google-genai`) SDK. **GitHub Copilot** is supported through a
-local LiteLLM gateway (below) and is selected via `COPILOT_MODEL`.
-
-If more than one provider is fully configured, the precedence is
-custom > google > anthropic > openai, and a configured direct provider always
-takes precedence over the GitHub Copilot gateway.
+uses the Gemini (`google-genai`) SDK. For **GitHub Copilot** you only set
+`COPILOT_MODEL` — the URL and key point at the local LiteLLM gateway, which relai
+starts and configures for you (see [below](#github-copilot-via-litellm)).
 
 At startup relai makes a minimal request to verify the provider is reachable. If
 no provider is configured (and the wizard is skipped or non-interactive), relai
-runs as a plain relay. Use `--no-llm` to skip LLM setup entirely.
+runs as a plain relay.
 
-
-```bash
-# Example: OpenAI, via the environment
-export OPENAI_API_URL=https://api.openai.com/v1
-export OPENAI_API_KEY=sk-...
-export OPENAI_MODEL=gpt-4o
-relai
-```
-
-`~/.relai/llm.conf` uses the same variable names, one `KEY=VALUE` per line
-(blank lines and `#` comments are ignored, and a leading `export` is allowed):
-
-```ini
-# ~/.relai/llm.conf
-OPENAI_API_URL=https://api.openai.com/v1
-OPENAI_API_KEY=sk-...
-OPENAI_MODEL=gpt-4o
-```
-
-### GitHub Copilot (via LiteLLM)
+### More on GitHub Copilot (via LiteLLM)
 
 relai can use **GitHub Copilot** as an OpenAI-compatible backend by spawning a
 local [LiteLLM](https://github.com/BerriAI/litellm) proxy that fronts LiteLLM's
@@ -213,35 +162,38 @@ exits.
 Each request waits up to **`RELAI_LLM_TIMEOUT`** seconds (default `30`). On a
 transient failure — a timeout, a dropped connection, a rate limit, or a `5xx`
 response — relai retries up to **`RELAI_LLM_MAX_RETRIES`** times (default `2`,
-with exponential backoff) and reports each retry in the AI panel. When a request
-finally fails, the panel shows the exception type, how long it ran versus the
-timeout, and the underlying cause, e.g.:
-
-```
-[relai] request failed: anthropic request failed after 30.0s (timeout 30s):
-anthropic.APITimeoutError: Request timed out ... (cause: TimeoutError: ...)
-```
+with exponential backoff).
 
 Both settings are read from the environment or `~/.relai/llm.conf`. If you see
 frequent timeouts on slow models or links, raise the timeout (and optionally the
-retry count):
+retry count).
 
-```bash
-export RELAI_LLM_TIMEOUT=120
-export RELAI_LLM_MAX_RETRIES=3
-```
+## Summoning the agent
 
-### Automatic context compaction
+Press **Ctrl-O** to open (or close) the AI panel — a bottom split where you type
+to the agent while your program keeps running above. Ctrl-O is used because
+`screen` (Ctrl-A) and `tmux` (Ctrl-B) leave it alone, so it works even inside
+nested sessions.
 
-The AI panel shows a `[NN%]` badge with how much of the model's context window
-the conversation currently uses. When it passes **80%**, relai automatically
-asks the model to summarize the conversation so far into a compact,
-continue-the-task brief, then replaces the running context with that summary and
-keeps going — so a long session never runs out of context. The full transcript
-stays visible in the panel (a `── context compacted · summary ──` line marks
-where it happened); only the model-facing history is trimmed. When a session is
-reloaded, it always resumes from its latest summary. You can also trigger this
-manually at any time with the **`/compact`** command.
+Inside the panel:
+
+- Type your request and press **Enter** to send it; **Esc** or **Ctrl-O** closes
+  the panel. The input line is a full editor — arrow keys, Home/End, Ctrl-A/E,
+  Ctrl-U/K/W, and mouse (bracketed) paste all work.
+- **Up / Down** scroll the conversation; **PageUp / PageDown** scroll by a page.
+- **Ctrl-G Up / Down** grow or shrink the panel one row; **Ctrl-G PageUp** snaps
+  it to half the screen and **Ctrl-G PageDown** restores the previous height.
+
+### Prefix commands
+
+Press the prefix key (default **Ctrl-G**), then a command letter:
+
+- `Ctrl-G` `a` — open the AI panel (same as Ctrl-O)
+- `Ctrl-G` `s` — open the scrollback viewer
+- `Ctrl-G` `o` — send a literal Ctrl-O byte to the program underneath
+- `Ctrl-G` `Ctrl-G` — send a literal prefix byte to the program underneath
+
+Change the prefix with `--prefix` (e.g. `relai --prefix ctrl-o`).
 
 ## Assistant tools
 
