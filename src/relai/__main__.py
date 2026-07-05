@@ -16,6 +16,7 @@ from .llm import (
     copilot_model,
     copilot_provider_config,
     create_client,
+    ensure_context_windows_file,
     write_copilot_conf,
     write_provider_conf,
 )
@@ -112,6 +113,9 @@ def _setup_llm(
     shutdown (``None`` for direct providers). ``client`` is ``None`` when no
     backend is configured, meaning relai runs as a plain relay.
     """
+    # Seed the editable context-window table on first run so users can tune it.
+    ensure_context_windows_file()
+
     if force_wizard and not _run_setup_wizard():
         _report_plain_relay()
         return None, None

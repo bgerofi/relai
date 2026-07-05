@@ -166,6 +166,32 @@ Both settings are read from the environment or `~/.relai/llm.conf`. If you see
 frequent timeouts on slow models or links, raise the timeout (and optionally the
 retry count).
 
+### Context window
+
+relai tracks how much of the model's context window a conversation uses (shown
+as a `[NN%]` badge in the panel, and used to trigger automatic summarization).
+It learns the window size from the provider's API when possible; otherwise it
+falls back to a small table of known models.
+
+On first run that table is written to **`~/.relai/context_windows.json`** — a
+self-documented JSON file you can edit. Each key is matched as a
+case-insensitive substring of the model id and the first match wins, so keep the
+most specific ids first:
+
+```jsonc
+{
+  "claude-opus-4": 1000000,
+  "gpt-5": 400000,
+  "gpt-4o": 128000,
+  "my-local-model": 32768
+}
+```
+
+relai re-reads the file whenever it changes, so edits take effect on the next
+request. Delete the file to regenerate the defaults. For a one-off override you
+can instead set `<PROVIDER>_CONTEXT_WINDOW` (e.g. `CUSTOM_CONTEXT_WINDOW`), which
+always wins.
+
 ## Summoning the agent
 
 Press **Ctrl-O** to open (or close) the AI panel — a bottom split where you type

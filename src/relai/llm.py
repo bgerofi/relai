@@ -617,10 +617,13 @@ def resolve_config() -> ProviderConfig | None:
 # Clients
 # ---------------------------------------------------------------------------
 
-# Fallback context windows for well-known models, used only when neither the
-# *_CONTEXT_WINDOW env var nor the provider API supplies one. Matched as a
-# case-insensitive substring of the model id, most specific entries first.
-_KNOWN_CONTEXT_WINDOWS: tuple[tuple[str, int], ...] = (
+# Seed fallback context windows for well-known models, used only when neither
+# the *_CONTEXT_WINDOW env var nor the provider API supplies one. Matched as a
+# case-insensitive substring of the model id, most specific entries first. These
+# are only the defaults: on first run they are written to
+# ``~/.relai/context_windows.json`` (see :func:`ensure_context_windows_file`),
+# and from then on that file is the source of truth so users can edit it.
+_DEFAULT_CONTEXT_WINDOWS: tuple[tuple[str, int], ...] = (
     # Anthropic (normally auto-detected via max_input_tokens, but many gateway /
     # proxy endpoints don't expose the models API, so these fallbacks matter).
     # The Claude 4 family (Opus 4.x / Sonnet 4.x) supports a 1M-token window;
@@ -629,6 +632,10 @@ _KNOWN_CONTEXT_WINDOWS: tuple[tuple[str, int], ...] = (
     ("claude-sonnet-4", 1_000_000),
     ("claude", 200_000),
     # OpenAI (the standard API does not report context size).
+    # The GPT-5 family (incl. the "*-codex" variants like gpt-5-codex /
+    # gpt-5.x-codex used via GitHub Copilot) has a 400k-token window; it must
+    # come before the gpt-4 entries so those substrings don't shadow it.
+    ("gpt-5", 400_000),
     ("gpt-4.1", 1_047_576),
     ("gpt-4o", 128_000),
     ("gpt-4-turbo", 128_000),
@@ -644,14 +651,96 @@ _KNOWN_CONTEXT_WINDOWS: tuple[tuple[str, int], ...] = (
     ("gemini", 1_048_576),
 )
 
+#: Explanatory note written into the JSON file so hand-editors know the rules.
+_CONTEXT_WINDOWS_DOC = (
+    "relai model context-window fallbacks, in tokens. Each key is matched as a "
+    "case-insensitive SUBSTRING of the model id and the FIRST match wins, so "
+    "keep the most specific model ids first. These are used only when neither a "
+    "*_CONTEXT_WINDOW override nor the provider API reports a window. Edit "
+    "freely (order matters); delete this file to regenerate the defaults."
+)
+
+
+def _context_windows_path() -> str:
+    """Path of the editable context-window table (JSON).
+
+    Honors ``RELAI_CONTEXT_WINDOWS`` (used by tests and power users), otherwise
+    ``~/.relai/context_windows.json``.
+    """
+    override = os.environ.get("RELAI_CONTEXT_WINDOWS")
+    if override:
+        return override
+    return os.path.join(os.path.expanduser("~"), ".relai", "context_windows.json")
+
+
+def context_windows_path() -> str:
+    """Public path of the context-window table file."""
+    return _context_windows_path()
+
+
+def ensure_context_windows_file(path: str | None = None) -> str:
+    """Write the default context-window table to ``path`` if it doesn't exist.
+
+    Called once at startup so users get a self-documenting file they can edit.
+    Best-effort: any filesystem error is ignored (the in-memory defaults are
+    used regardless). Returns the path.
+    """
+    if path is None:
+        path = _context_windows_path()
+    if os.path.exists(path):
+        return path
+    data: dict[str, Any] = {"_comment": _CONTEXT_WINDOWS_DOC}
+    for needle, window in _DEFAULT_CONTEXT_WINDOWS:
+        data[needle] = window
+    try:
+        os.makedirs(os.path.dirname(path) or ".", exist_ok=True)
+        with open(path, "w", encoding="utf-8") as fh:
+            json.dump(data, fh, indent=2)
+            fh.write("\n")
+    except OSError:
+        pass
+    return path
+
+
+def _load_context_windows(path: str | None = None) -> list[tuple[str, int]]:
+    """Return the ordered (needle, window) table, from the file if present.
+
+    Reads ``~/.relai/context_windows.json`` when it exists so user edits take
+    effect immediately; otherwise falls back to the built-in defaults. Any
+    malformed file or entry is skipped rather than raised (this runs on the
+    request path and must never break a working provider).
+    """
+    if path is None:
+        path = _context_windows_path()
+    try:
+        with open(path, "r", encoding="utf-8") as fh:
+            data = json.load(fh)
+    except (OSError, ValueError):
+        return list(_DEFAULT_CONTEXT_WINDOWS)
+    if not isinstance(data, dict):
+        return list(_DEFAULT_CONTEXT_WINDOWS)
+    entries: list[tuple[str, int]] = []
+    for key, val in data.items():
+        # Keys starting with "_" are reserved for comments/metadata.
+        if not isinstance(key, str) or key.startswith("_") or isinstance(val, bool):
+            continue
+        try:
+            window = int(val)
+        except (TypeError, ValueError):
+            continue
+        if window > 0:
+            entries.append((key, window))
+    return entries or list(_DEFAULT_CONTEXT_WINDOWS)
+
 
 def _known_context_window(model: str) -> int:
     """Return a fallback context window for ``model`` (0 if not recognized)."""
     m = (model or "").lower()
-    for needle, window in _KNOWN_CONTEXT_WINDOWS:
-        if needle in m:
+    for needle, window in _load_context_windows():
+        if needle.lower() in m:
             return window
     return 0
+
 
 
 def _first_positive_int(obj: Any, *names: str) -> int:

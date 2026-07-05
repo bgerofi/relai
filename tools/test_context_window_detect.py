@@ -8,12 +8,17 @@ Run:
         && python tools/test_context_window_detect.py
 """
 
+import json
+import os
+import tempfile
+
 from relai.llm import (
     DEFAULT_TIMEOUT,
     ProviderConfig,
     _client_for,
     _first_positive_int,
     _known_context_window,
+    ensure_context_windows_file,
 )
 
 
@@ -61,12 +66,58 @@ def test_known_table():
     assert _known_context_window("gpt-4-turbo-2024") == 128_000
     assert _known_context_window("gpt-4") == 8_192
     assert _known_context_window("gpt-3.5-turbo") == 16_385
+    # GPT-5 family, including the Copilot "*-codex" variants (gpt-5.x-codex).
+    assert _known_context_window("gpt-5") == 400_000
+    assert _known_context_window("gpt-5-codex") == 400_000
+    assert _known_context_window("github_copilot/gpt-5.3-codex") == 400_000
+    assert _known_context_window("gpt-5-mini") == 400_000
     assert _known_context_window("gemini-1.5-pro-latest") == 2_097_152
     assert _known_context_window("gemini-2.0-flash") == 1_048_576
     assert _known_context_window("o3-mini") == 200_000
     assert _known_context_window("some-unknown-model") == 0
     assert _known_context_window("") == 0
     print("known-model table: OK")
+
+
+def test_context_windows_file():
+    with tempfile.TemporaryDirectory() as d:
+        path = os.path.join(d, "context_windows.json")
+        prev = os.environ.get("RELAI_CONTEXT_WINDOWS")
+        os.environ["RELAI_CONTEXT_WINDOWS"] = path
+        try:
+            # first run: defaults are written, self-documented, and used
+            assert not os.path.exists(path)
+            ensure_context_windows_file()
+            assert os.path.exists(path)
+            with open(path, encoding="utf-8") as fh:
+                data = json.load(fh)
+            assert "_comment" in data and data["gpt-4o"] == 128_000
+            assert _known_context_window("gpt-4o-mini") == 128_000
+
+            # a user edit is picked up immediately (order + custom entries)
+            with open(path, "w", encoding="utf-8") as fh:
+                json.dump({"_comment": "x", "my-model": 4242, "gpt-4o": 999}, fh)
+            assert _known_context_window("my-model-v2") == 4242
+            assert _known_context_window("gpt-4o") == 999
+            assert _known_context_window("unknown") == 0
+
+            # ensure_* is idempotent: it must NOT clobber an existing file
+            ensure_context_windows_file()
+            assert _known_context_window("my-model") == 4242
+
+            # a malformed / empty file falls back to the built-in defaults
+            with open(path, "w", encoding="utf-8") as fh:
+                fh.write("{ not json")
+            assert _known_context_window("gpt-4o-mini") == 128_000
+            with open(path, "w", encoding="utf-8") as fh:
+                json.dump({"_comment": "only a comment"}, fh)
+            assert _known_context_window("gpt-4o-mini") == 128_000
+        finally:
+            if prev is None:
+                os.environ.pop("RELAI_CONTEXT_WINDOWS", None)
+            else:
+                os.environ["RELAI_CONTEXT_WINDOWS"] = prev
+    print("context-windows file: OK")
 
 
 def test_first_positive_int():
@@ -167,7 +218,13 @@ def test_verify_triggers_detection():
 
 
 if __name__ == "__main__":
+    # Point default-based tests at a nonexistent file so they exercise the
+    # built-in defaults regardless of any real ~/.relai/context_windows.json.
+    os.environ["RELAI_CONTEXT_WINDOWS"] = os.path.join(
+        tempfile.gettempdir(), "relai-nonexistent-context-windows.json"
+    )
     test_known_table()
+    test_context_windows_file()
     test_first_positive_int()
     test_property_precedence()
     test_openai_detect()
