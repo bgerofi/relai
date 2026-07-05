@@ -1,7 +1,12 @@
 # RelAI
 
-**relai** is an AI agent that sits transparently on the character stream between
-you and whatever terminal-based program you're running, wherever you happen to
+Are you tired of having to talk to your favorite LLM on a dedicated chat interface and copy
+commands into your terminal? Have you ever wanted an AI agent that would just pop out of
+nowhere and help you with anything you are working on? Have you had enough of setting up
+custom coding tools to help you with generic CLI tasks? Then you are at the right place.
+
+**relai** is an AI harness/agent that sits transparently on the character stream between
+you and any terminal-based program you're running, wherever you happen to
 be running it. It sees exactly what you see, and it's ready to help with whatever
 you need, whenever you need it.
 
@@ -15,9 +20,11 @@ relai is **host transparent**, it processes the PTY byte stream and it
 travels with you across `ssh` hops, nested `tmux`/`screen` sessions,
 even interactive jobs on a supercomputer.
 It keeps working on the far side without any agent or API key installed
-on the remote host. Your session, wherever it goes, carries the agent along.
+on the remote host, or the usual proxy settings madness.
+Your session, wherever it goes, carries the agent along.
 
-You are in control by default, but once you summon the agent, it can:
+You are in control by default, **relai** does not disturb you, but once you summon
+the agent, it can:
 
 - **Run commands** on your behalf (and read back their output).
 - **Control interactive applications** by sending real keystrokes, edit in
