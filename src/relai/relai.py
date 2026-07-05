@@ -1361,11 +1361,27 @@ class Relai:
 
         # Streamed narration: as the model produces text, show it live (dim)
         # above the spinner so the user sees what it is doing. It is transient --
-        # each turn starts fresh and the final reply replaces it entirely.
+        # each turn starts fresh and the final reply replaces it entirely. The
+        # running narration of this turn -- the model's streamed reasoning from
+        # each request plus the tool-call notes -- is accumulated so the user
+        # sees the whole history of what happened; only the currently-streaming
+        # text of the in-flight request sits below it. It is purged when the
+        # final answer replaces it (see :meth:`_finish_ask`).
+        narration: list[str] = []
+        last_stream = ""
+
+        def _compose(streamed: str = "") -> str:
+            parts = list(narration)
+            if streamed:
+                parts.append(streamed)
+            return "\n".join(parts)
+
         def _on_text(text: str) -> None:
+            nonlocal last_stream
+            last_stream = text
             p = self._panel
             if p is not None:
-                p.interim = text
+                p.interim = _compose(text)
 
         try:
             while True:
@@ -1380,7 +1396,8 @@ class Relai:
                     checkpoint = len(self._llm_history)
                 if panel is not None:
                     panel.activity = "Thinking"
-                    panel.interim = ""
+                    panel.interim = _compose()
+                last_stream = ""
                 turn = self.llm.converse(
                     [system, *self._llm_history],
                     tools=tools,
@@ -1392,9 +1409,16 @@ class Relai:
                     self._panel.context_pct = turn.usage.context_percent()
                 if not turn.tool_calls:
                     return turn.text
+                # Keep this request's streamed reasoning/commentary in the
+                # narration (above the tool notes) so it stays visible through
+                # the following tool round-trips instead of vanishing.
+                if last_stream:
+                    narration.append(last_stream)
                 for call in turn.tool_calls:
+                    narration.append(self._tool_call_note(call))
                     if self._panel is not None:
                         self._panel.activity = f"Calling {call.name}"
+                        self._panel.interim = _compose()
                     output = self._run_tool(call)
                     self._llm_history.append(
                         self.llm.tool_result_message(call.id, output)
@@ -1624,6 +1648,24 @@ class Relai:
                 },
             ),
         ]
+
+    def _tool_call_note(self, call: "ToolCall") -> str:
+        """One-line summary of a tool invocation for the live narration.
+
+        Appended to the transient "Thinking" narration (``panel.interim``) so the
+        user can see the running history of what the agent is doing -- including
+        fast, in-memory tools like ``capture_screen_history`` whose "Calling ..."
+        spinner label would flash by faster than a render frame. It is purged
+        when the final answer replaces the narration. String arguments are quoted
+        (so control characters injected via ``inject_input`` are visible as
+        escapes) and long values are truncated.
+        """
+        parts: list[str] = []
+        for key, val in call.input.items():
+            if isinstance(val, str) and len(val) > 60:
+                val = val[:57] + "\u2026"
+            parts.append(f"{key}={val!r}")
+        return f"\u2192 {call.name}(" + ", ".join(parts) + ")"
 
     def _run_tool(self, call: "ToolCall") -> str:
         """Execute a model-requested tool and return its result text."""

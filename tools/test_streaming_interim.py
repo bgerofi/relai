@@ -215,11 +215,18 @@ def test_relai_streams_and_clears_interim(tmp_path: Path):
     result = r._ask_llm("what is on screen?")
     assert result == "final answer is 42", result
 
-    # Every turn began with a cleared interim (refreshed per turn, so the prior
-    # turn's narration never lingers into the next request).
-    assert r.llm.interim_at_entry == ["", ""], r.llm.interim_at_entry
-    # After the last streamed turn, interim holds the final narration...
-    assert panel.interim == "final answer is 42", panel.interim
+    # The first turn begins with a cleared interim; the second begins with the
+    # running narration from the first turn -- its streamed reasoning AND its
+    # tool-call note -- so nothing vanishes between tool round-trips.
+    assert r.llm.interim_at_entry == [
+        "",
+        "step one narration\n\u2192 b64_encode(text='hi')",
+    ], r.llm.interim_at_entry
+    # After the last streamed turn, interim shows the full history above the
+    # final streamed narration...
+    assert panel.interim == (
+        "step one narration\n\u2192 b64_encode(text='hi')\nfinal answer is 42"
+    ), panel.interim
 
     # ...until the turn is delivered, which removes the transient narration.
     r._ask_result = result
