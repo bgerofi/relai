@@ -310,6 +310,13 @@ class Ludvart:
         # open; ``_mcp_started`` guards the one-off automatic discovery.
         self._mcp: McpManager | None = None
         self._mcp_started = False
+        # Private per-run scratch directory for files saved by ``fetch_url``.
+        # Created lazily on first fetch (see ``_fetch_tmp_dir``) as a 0700
+        # directory owned by this user, and removed wholesale when ``run``
+        # exits (including on unhandled exceptions and Ctrl-C). We do NOT sweep
+        # a shared prefix at startup: /tmp is multi-user and files there may
+        # belong to other users or concurrent ludvart sessions.
+        self._fetch_dir: str | None = None
 
         rows, cols = _get_winsize(self._stdout_fd)
         # pyte keeps a live model of what the child has drawn on screen, plus a
@@ -369,6 +376,7 @@ class Ludvart:
             if self._capture_fd is not None:
                 os.close(self._capture_fd)
                 self._capture_fd = None
+            self._cleanup_fetch_dir()
 
     # -- screen inspection (for the AI layer) --------------------------------
 
@@ -1666,6 +1674,94 @@ class Ludvart:
                     "required": ["b64"],
                 },
             ),
+            ToolSpec(
+                name="web_search",
+                description=(
+                    "Perform a DuckDuckGo web search to retrieve the most up-to-date information "
+                    "on any query. Returns a list of titles, target URLs, and descriptive snippets."
+                ),
+                input_schema={
+                    "type": "object",
+                    "properties": {
+                        "query": {
+                            "type": "string",
+                            "description": "The search query to lookup.",
+                        },
+                    },
+                    "required": ["query"],
+                },
+            ),
+            ToolSpec(
+                name="fetch_url",
+                description=(
+                    "Download the contents of a URL and save it to a temporary file under /tmp on the "
+                    "remote host where ludvart is running (which might be different from the host the user "
+                    "sees in the terminal). Returns the path to the saved file and a brief summary of the download."
+                ),
+                input_schema={
+                    "type": "object",
+                    "properties": {
+                        "url": {
+                            "type": "string",
+                            "description": "The absolute HTTP or HTTPS URL to fetch/download.",
+                        },
+                    },
+                    "required": ["url"],
+                },
+            ),
+            ToolSpec(
+                name="read_local_file",
+                description=(
+                    "Read a window of lines from a local file on the host where ludvart runs. "
+                    "Like a code editor's file reader, this returns at most a bounded number of lines "
+                    "per call; large files are read by calling repeatedly, paging forward. The typical "
+                    "pattern is to call get_local_file_info first to learn the line count, then call "
+                    "read_local_file for successive line ranges. When a read does not reach the end of "
+                    "the file, the result reports the start_line to pass next to continue. This is useful "
+                    "to inspect files saved by other tools like fetch_url. The file path refers to the host "
+                    "running ludvart, which is not necessarily the same host shown in the terminal."
+                ),
+                input_schema={
+                    "type": "object",
+                    "properties": {
+                        "path": {
+                            "type": "string",
+                            "description": "The path to the file to read (e.g. /tmp/...)",
+                        },
+                        "start_line": {
+                            "type": "integer",
+                            "description": "The 1-based line number to start reading from (inclusive). Defaults to 1.",
+                        },
+                        "end_line": {
+                            "type": "integer",
+                            "description": (
+                                "The 1-based line number to stop reading at (inclusive). If omitted, a "
+                                "default window of lines from start_line is returned. The number of lines "
+                                "returned in a single call is capped regardless of this value; read again "
+                                "with a later start_line to continue."
+                            ),
+                        },
+                    },
+                    "required": ["path"],
+                },
+            ),
+            ToolSpec(
+                name="get_local_file_info",
+                description=(
+                    "Retrieve information about a local file on the remote host running ludvart (e.g. size, number of lines, "
+                    "and modified time). This is helpful to plan chunked reading using read_local_file."
+                ),
+                input_schema={
+                    "type": "object",
+                    "properties": {
+                        "path": {
+                            "type": "string",
+                            "description": "The path to the file on the host running ludvart.",
+                        },
+                    },
+                    "required": ["path"],
+                },
+            ),
         ]
 
     def _tool_call_note(self, call: "ToolCall") -> str:
@@ -1696,11 +1792,266 @@ class Ludvart:
             return self._tool_b64_encode(call.input)
         if call.name == "b64_decode":
             return self._tool_b64_decode(call.input)
+        if call.name == "web_search":
+            return self._tool_web_search(call.input)
+        if call.name == "fetch_url":
+            return self._tool_fetch_url(call.input)
+        if call.name == "read_local_file":
+            return self._tool_read_local_file(call.input)
+        if call.name == "get_local_file_info":
+            return self._tool_get_local_file_info(call.input)
         if self._mcp is not None and self._mcp.is_mcp_tool(call.name):
             if self._panel is not None:
                 self._panel.activity = f"Calling {call.name}"
             return self._mcp.call_tool(call.name, call.input)
         return f"[ludvart] unknown tool: {call.name}"
+
+    #: Cap on how much fetch_url writes to /tmp, so a hostile or accidental huge
+    #: response cannot fill the disk on the host running ludvart.
+    _FETCH_URL_MAX_BYTES = 10 * 1024 * 1024
+
+    def _fetch_tmp_dir(self) -> str:
+        """Return this run's private scratch dir, creating it on first use.
+
+        ``tempfile.mkdtemp`` makes a uniquely named 0700 directory owned by the
+        current user, so files saved here are never confused with those of other
+        users or concurrent ludvart processes. Removed by ``_cleanup_fetch_dir``
+        when ``run`` exits.
+        """
+        if self._fetch_dir is None:
+            import tempfile
+
+            self._fetch_dir = tempfile.mkdtemp(prefix="ludvart_")
+        return self._fetch_dir
+
+    def _cleanup_fetch_dir(self) -> None:
+        """Remove this run's fetch scratch dir and everything under it."""
+        if self._fetch_dir is None:
+            return
+        import shutil
+
+        shutil.rmtree(self._fetch_dir, ignore_errors=True)
+        self._fetch_dir = None
+
+    def _tool_fetch_url(self, args: dict) -> str:
+        """Fetch a URL and save it to a temp file on the host running ludvart."""
+        url = args.get("url")
+        if not isinstance(url, str):
+            return "[ludvart] fetch_url: 'url' must be a string."
+        url = url.strip()
+        if not url:
+            return "[ludvart] fetch_url: 'url' is empty."
+        import urllib.request, urllib.error, urllib.parse, tempfile, os
+
+        scheme = urllib.parse.urlparse(url).scheme.lower()
+        if scheme not in ("http", "https"):
+            return (
+                f"[ludvart] fetch_url: unsupported URL scheme "
+                f"{scheme or '(none)'!r} (only http/https are allowed)."
+            )
+        max_bytes = self._FETCH_URL_MAX_BYTES
+        headers = {"User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64)"}
+        try:
+            req = urllib.request.Request(url, headers=headers)
+            with urllib.request.urlopen(req, timeout=30) as resp:
+                # Read one byte past the cap so we can report truncation without
+                # ever holding more than the cap plus one byte in memory.
+                raw = resp.read(max_bytes + 1)
+                charset = resp.headers.get_content_charset() or "utf-8"
+        except urllib.error.HTTPError as exc:
+            return f"[ludvart] fetch_url failed with status code: {exc.code}"
+        except Exception as exc:
+            return f"[ludvart] fetch_url failed: {exc}"
+
+        truncated = len(raw) > max_bytes
+        if truncated:
+            raw = raw[:max_bytes]
+        try:
+            text = raw.decode(charset, errors="replace")
+        except LookupError:
+            # Unknown charset advertised by the server -> fall back to utf-8.
+            text = raw.decode("utf-8", errors="replace")
+
+        fd, path = tempfile.mkstemp(
+            prefix="ludvart_", suffix=".html", dir=self._fetch_tmp_dir()
+        )
+        with os.fdopen(fd, "w", encoding="utf-8", errors="replace") as f:
+            f.write(text)
+
+        note = " (truncated at cap)" if truncated else ""
+        return (
+            f"[ludvart] Successfully fetched {url}\n"
+            f"Saved content to a temporary file on the host running ludvart:\n"
+            f"PATH: {path}\n"
+            f"SIZE: {len(text)} characters{note}\n"
+            f"To read this file, use the 'read_local_file' tool."
+        )
+
+    def _tool_get_local_file_info(self, args: dict) -> str:
+        """Get details (size, lines count) of a local file on the host running ludvart."""
+        path = args.get("path")
+        if not isinstance(path, str):
+            return "[ludvart] get_local_file_info: 'path' must be a string."
+        import os, datetime
+        if not os.path.isfile(path):
+            return f"[ludvart] get_local_file_info: '{path}' is not a file."
+        try:
+            st = os.stat(path)
+            line_count = 0
+            with open(path, "rb") as f:
+                for _line in f:
+                    line_count += 1
+            mtime = datetime.datetime.fromtimestamp(st.st_mtime).isoformat(
+                timespec="seconds"
+            )
+            return (
+                f"[ludvart] File info for {path}:\n"
+                f"SIZE: {st.st_size} bytes\n"
+                f"LINES: {line_count} lines\n"
+                f"MODIFIED: {mtime}\n"
+            )
+        except Exception as exc:
+            return f"[ludvart] get_local_file_info failed: {exc}"
+
+    #: Maximum number of lines a single read_local_file call returns. Larger
+    #: files are paged through with repeated calls (like an editor's reader).
+    _READ_MAX_LINES = 2000
+
+    def _tool_read_local_file(self, args: dict) -> str:
+        """Read a bounded window of lines from a local file on ludvart's host.
+
+        Behaves like a code editor's file reader: a single call returns at most
+        ``_READ_MAX_LINES`` lines. When the window does not reach end of file the
+        result reports the ``start_line`` to pass on the next call, so the model
+        pages through large files with successive reads.
+        """
+        path = args.get("path")
+        if not isinstance(path, str):
+            return "[ludvart] read_local_file: 'path' must be a string."
+        import os
+        if not os.path.isfile(path):
+            return f"[ludvart] read_local_file: '{path}' is not a file."
+
+        start_line = args.get("start_line", 1)
+        end_line = args.get("end_line")
+        # bool is a subclass of int; reject it explicitly so True/False are not
+        # silently treated as line 1/0.
+        if isinstance(start_line, bool) or not isinstance(start_line, int):
+            return "[ludvart] read_local_file: 'start_line' must be an integer."
+        if end_line is not None and (
+            isinstance(end_line, bool) or not isinstance(end_line, int)
+        ):
+            return "[ludvart] read_local_file: 'end_line' must be an integer."
+        if start_line < 1:
+            start_line = 1
+        max_lines = self._READ_MAX_LINES
+        if end_line is None:
+            end_line = start_line + max_lines - 1
+        if end_line < start_line:
+            return "[ludvart] read_local_file: 'end_line' must be >= 'start_line'."
+        # Cap the window so one call never returns more than max_lines lines.
+        window_end = min(end_line, start_line + max_lines - 1)
+
+        try:
+            selected: list[str] = []
+            has_more = False
+            with open(path, "r", encoding="utf-8", errors="replace") as f:
+                for idx, line in enumerate(f, 1):
+                    if idx < start_line:
+                        continue
+                    if idx > window_end:
+                        # There is at least one line beyond the window.
+                        has_more = True
+                        break
+                    selected.append(line)
+        except Exception as exc:
+            return f"[ludvart] read_local_file failed: {exc}"
+
+        if not selected:
+            return (
+                f"[ludvart] read_local_file: {path} has no lines at or after "
+                f"line {start_line} (start_line is past the end of the file)."
+            )
+
+        last_line = start_line + len(selected) - 1
+        content = "".join(selected)
+        # Secondary safety cap on raw characters (e.g. pathologically long lines).
+        char_limit = 150_000
+        char_truncated = len(content) > char_limit
+        if char_truncated:
+            content = content[:char_limit]
+
+        notes: list[str] = []
+        if has_more:
+            notes.append(
+                f"More lines follow; continue with start_line={last_line + 1}."
+            )
+        if char_truncated:
+            notes.append(f"Output truncated to {char_limit} characters.")
+
+        body = content if content.endswith("\n") else content + "\n"
+        result = (
+            f"[ludvart] {path} lines {start_line}-{last_line}:\n"
+            f"--------------------------------------------------\n"
+            f"{body}"
+            f"--------------------------------------------------\n"
+        )
+        if notes:
+            result += "\n".join(notes) + "\n"
+        return result
+
+
+    def _tool_web_search(self, args: dict) -> str:
+        """Perform a DuckDuckGo web search to retrieve up-to-date information."""
+        query = args.get("query")
+        if not isinstance(query, str):
+            return "[ludvart] web_search: 'query' must be a string."
+        if not query.strip():
+            return "[ludvart] web_search: nothing to search (empty 'query')."
+        import urllib.request, urllib.error, urllib.parse, re, html
+
+        url = f"https://html.duckduckgo.com/html/?q={urllib.parse.quote(query)}"
+        headers = {"User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64)"}
+        try:
+            req = urllib.request.Request(url, headers=headers)
+            with urllib.request.urlopen(req, timeout=15) as resp:
+                body = resp.read(2 * 1024 * 1024)
+                charset = resp.headers.get_content_charset() or "utf-8"
+            page = body.decode(charset, errors="replace")
+        except urllib.error.HTTPError as exc:
+            return f"[ludvart] web_search failed with status code: {exc.code}"
+        except Exception as exc:
+            return f"[ludvart] web_search failed: {exc}"
+
+        def _clean(fragment: str) -> str:
+            # Strip tags, then decode HTML entities (&amp;, &#x27;, ...).
+            return html.unescape(re.sub(r"<[^>]+>", "", fragment)).strip()
+
+        blocks = page.split('<div class="links_main links_deep result__body">')[1:]
+        outputs = []
+        for block in blocks[:10]:
+            title_match = re.search(
+                r'class="result__a"[^>]*href="([^"]+)"[^>]*>(.*?)</a>',
+                block,
+                re.DOTALL,
+            )
+            if not title_match:
+                continue
+            snippet_match = re.search(
+                r'class="result__snippet"[^>]*>(.*?)</a>', block, re.DOTALL
+            )
+            raw_url = html.unescape(title_match.group(1))
+            qs = urllib.parse.parse_qs(urllib.parse.urlparse(raw_url).query)
+            actual_url = qs.get("uddg", [raw_url])[0]
+            title = _clean(title_match.group(2))
+            snippet = _clean(snippet_match.group(1)) if snippet_match else ""
+            outputs.append(
+                f"TITLE: {title}\nURL: {actual_url}\nSNIPPET: {snippet}\n"
+            )
+
+        if not outputs:
+            return "[ludvart] web_search: No results found."
+        return "\n---\n".join(outputs)
 
     def _tool_b64_encode(self, args: dict) -> str:
         """Base64-encode text natively (no shell/PTY round-trip)."""
