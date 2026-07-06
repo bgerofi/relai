@@ -1496,6 +1496,7 @@ class Ludvart:
             "fails without writing if the match count differs; '--dry-run' on "
             "replace/write returns a unified diff instead of writing; "
             "'replace-range --start N --end M --b64 DATA' swaps a line range; "
+            "'structured-patch PATH --b64 JSON' applies multiple exact edits atomically; "
             "writes auto-save a .ludvart.bak, and a .py edit that breaks syntax "
             "returns exit=4 (error=py_syntax) so failures are explicit.)\n\n"
             + LUDVART_HELPERS_DOC

@@ -1,8 +1,8 @@
 #!/usr/bin/env python3
-import sys, os, base64, argparse, subprocess, re, fnmatch, difflib, py_compile
+import sys, os, base64, argparse, subprocess, re, fnmatch, difflib, py_compile, json
 
-VER = "0.2.2"
-CAPS = "read,write,append,replace,replace-range,search,run,info"
+VER = "0.2.3"
+CAPS = "read,write,append,replace,replace-range,structured-patch,search,run,info"
 
 def emit(op, payload_bytes=None, code=0, **meta):
     sys.stdout.write("<<<LUDVART:BEGIN op=%s>>>\n" % op)
@@ -111,6 +111,48 @@ def op_replace_range(a):
     ndata = b"\n".join(lines[:s] + new.split(b"\n") + lines[e:])
     return _save("replace-range", a.path, ndata, a.dry_run, range="%d-%d" % (a.start, a.end))
 
+def op_structured_patch(a):
+    try:
+        spec = json.loads(base64.b64decode(a.b64).decode("utf-8"))
+    except Exception:
+        return emit("structured-patch", None, 5, path=a.path, error="bad_json")
+    edits = spec.get("edits") if isinstance(spec, dict) else None
+    if not isinstance(edits, list) or not edits:
+        return emit("structured-patch", None, 6, path=a.path, error="no_edits")
+    with open(a.path, "rb") as f:
+        data = f.read()
+    replaced_total = 0
+    for i, edit in enumerate(edits, 1):
+        if not isinstance(edit, dict):
+            return emit("structured-patch", None, 6, path=a.path, error="bad_edit", index=i)
+        old_b64 = edit.get("old_b64")
+        new_b64 = edit.get("new_b64")
+        if old_b64 is None or new_b64 is None:
+            return emit("structured-patch", None, 6, path=a.path, error="bad_edit", index=i)
+        try:
+            old = base64.b64decode(old_b64)
+            new = base64.b64decode(new_b64)
+        except Exception:
+            return emit("structured-patch", None, 6, path=a.path, error="bad_edit_b64", index=i)
+        found = data.count(old)
+        if found == 0:
+            return emit("structured-patch", None, 2, path=a.path, error="old_not_found", index=i)
+        expect = edit.get("expect_count", 1)
+        if expect is not None and found != expect:
+            return emit("structured-patch", None, 3, path=a.path,
+                        error="count_mismatch", index=i, found=found, expected=expect)
+        cnt = edit.get("count")
+        if cnt is not None:
+            if not isinstance(cnt, int) or cnt < 0:
+                return emit("structured-patch", None, 6, path=a.path, error="bad_count", index=i)
+            data = data.replace(old, new, cnt)
+            replaced_total += min(found, cnt)
+        else:
+            data = data.replace(old, new)
+            replaced_total += found
+    return _save("structured-patch", a.path, data, a.dry_run,
+                 edits=len(edits), replaced=replaced_total)
+
 SKIP = {".git", "node_modules", "__pycache__"}
 
 def op_search(a):
@@ -164,6 +206,7 @@ def main():
     ap = sub.add_parser("append"); ap.add_argument("path"); ap.add_argument("--b64", required=True); ap.set_defaults(fn=op_append)
     rp = sub.add_parser("replace"); rp.add_argument("path"); rp.add_argument("--old-b64", dest="old_b64", required=True); rp.add_argument("--new-b64", dest="new_b64", required=True); rp.add_argument("--count", type=int); rp.add_argument("--expect-count", dest="expect_count", type=int); rp.add_argument("--dry-run", action="store_true"); rp.set_defaults(fn=op_replace)
     rr = sub.add_parser("replace-range"); rr.add_argument("path"); rr.add_argument("--start", type=int, required=True); rr.add_argument("--end", type=int, required=True); rr.add_argument("--b64", required=True); rr.add_argument("--dry-run", action="store_true"); rr.set_defaults(fn=op_replace_range)
+    sp = sub.add_parser("structured-patch"); sp.add_argument("path"); sp.add_argument("--b64", required=True); sp.add_argument("--dry-run", action="store_true"); sp.set_defaults(fn=op_structured_patch)
     s = sub.add_parser("search"); s.add_argument("pattern"); s.add_argument("--path", default="."); s.add_argument("--glob"); s.set_defaults(fn=op_search)
     rn = sub.add_parser("run"); rn.add_argument("--b64", required=True); rn.set_defaults(fn=op_run)
     inf = sub.add_parser("info"); inf.set_defaults(fn=op_info)

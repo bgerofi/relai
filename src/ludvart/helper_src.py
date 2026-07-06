@@ -46,7 +46,7 @@ LUDVART_HELPER_MD5: str = hashlib.md5(LUDVART_HELPER_SOURCE).hexdigest()
 # source. If ``assets/ludvart_helper`` is ever changed, this constant must be
 # updated to match -- so a silent swap of the asset is caught at import time,
 # and the harness only ever installs a helper whose checksum it vouches for.
-LUDVART_HELPER_MD5_EXPECTED = "953614a8e3ea28c8f98b59d389af395d"
+LUDVART_HELPER_MD5_EXPECTED = "34793c4974f88e6654668d1156b8611f"
 
 if LUDVART_HELPER_MD5 != LUDVART_HELPER_MD5_EXPECTED:  # pragma: no cover - guard
     raise RuntimeError(
