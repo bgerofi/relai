@@ -136,6 +136,58 @@ def test_anthropic_non_stream_unchanged():
     print("anthropic non-stream path unchanged: OK")
 
 
+def _anthropic_client():
+    return AnthropicClient(
+        ProviderConfig(name="anthropic", api_url="http://x", api_key="k", model="m")
+    )
+
+
+def test_anthropic_drops_empty_text_block():
+    """A whitespace-only text block must not survive into the replayed message.
+
+    Claude sometimes emits an empty text block before a tool_use; Anthropic then
+    rejects the message on replay ("text content blocks must contain
+    non-whitespace text"). The empty block is dropped from assistant_message but
+    the tool_use is kept.
+    """
+    resp = SimpleNamespace(
+        content=[
+            SimpleNamespace(type="text", text="   "),
+            SimpleNamespace(type="tool_use", id="t1", name="do_it", input={}),
+        ],
+        usage=SimpleNamespace(input_tokens=1, output_tokens=1),
+    )
+    client = _anthropic_client()
+    client._client = SimpleNamespace(
+        messages=SimpleNamespace(create=lambda **kw: resp)
+    )
+    turn = client.converse([{"role": "user", "content": "hi"}])
+    blocks = turn.assistant_message["content"]
+    types = [b["type"] for b in blocks]
+    assert "text" not in types, blocks  # empty text dropped
+    assert "tool_use" in types, blocks  # tool call kept
+    assert turn.tool_calls and turn.tool_calls[0].name == "do_it"
+    print("anthropic drops empty text block: OK")
+
+
+def test_anthropic_empty_only_turn_gets_filler():
+    """A turn with only an empty text block still yields a valid message."""
+    resp = SimpleNamespace(
+        content=[SimpleNamespace(type="text", text="")],
+        usage=SimpleNamespace(input_tokens=1, output_tokens=1),
+    )
+    client = _anthropic_client()
+    client._client = SimpleNamespace(
+        messages=SimpleNamespace(create=lambda **kw: resp)
+    )
+    turn = client.converse([{"role": "user", "content": "hi"}])
+    blocks = turn.assistant_message["content"]
+    # Not empty, and the single block has non-whitespace text.
+    assert blocks and blocks[0]["type"] == "text"
+    assert blocks[0]["text"].strip() != ""
+    print("anthropic empty-only turn gets filler: OK")
+
+
 # -- panel renders the interim line ----------------------------------------
 
 
@@ -244,6 +296,8 @@ def main():
     test_base_converse_calls_on_text()
     test_anthropic_converse_streams_and_assembles()
     test_anthropic_non_stream_unchanged()
+    test_anthropic_drops_empty_text_block()
+    test_anthropic_empty_only_turn_gets_filler()
     test_panel_renders_interim_line()
     with tempfile.TemporaryDirectory() as d:
         test_ludvart_streams_and_clears_interim(Path(d))

@@ -1284,7 +1284,14 @@ class AnthropicClient(LLMClient):
             for block in resp.content:
                 if block.type == "text":
                     text_parts.append(block.text)
-                    blocks.append({"type": "text", "text": block.text})
+                    # Anthropic rejects a replayed assistant message that
+                    # contains an empty/whitespace-only text block ("text
+                    # content blocks must contain non-whitespace text"), which
+                    # Claude sometimes emits before going straight to a
+                    # tool_use. Keep such text in the UI-facing ``text`` but
+                    # drop it from the replayed content blocks.
+                    if block.text and block.text.strip():
+                        blocks.append({"type": "text", "text": block.text})
                 elif block.type == "tool_use":
                     blocks.append(
                         {
@@ -1301,6 +1308,12 @@ class AnthropicClient(LLMClient):
                     )
         except (AttributeError, TypeError) as exc:
             raise LLMError(f"unexpected response from {self.name}: {resp!r}") from exc
+        # An assistant message with no content blocks is also rejected on
+        # replay; if the turn had neither usable text nor a tool call, keep a
+        # minimal non-whitespace text block (a lone space would still fail
+        # Anthropic's "non-whitespace text" check) so the message stays valid.
+        if not blocks:
+            blocks.append({"type": "text", "text": "(no content)"})
         return Turn(
             text="".join(text_parts),
             tool_calls=tool_calls,
