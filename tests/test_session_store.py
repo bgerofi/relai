@@ -16,6 +16,8 @@ from ludvart.session import (
     list_sessions,
     load_session,
     persisted_messages,
+    provider_family,
+    sanitize_history,
     sessions_root,
 )
 
@@ -52,7 +54,7 @@ def test_save_and_reload_roundtrip():
 
     assert store.path.is_file()
     data = json.loads(store.path.read_text())
-    assert data["version"] == 1
+    assert data["version"] == 2
     assert data["session_id"] == "2026-07-02/08_05_09"
     assert data["started_at"] == "2026-07-02T08:05:09Z"
     assert data["updated_at"].endswith("Z")
@@ -152,6 +154,145 @@ def test_sessions_root_env_override(monkeypatch=None):
     print("sessions_root env override: OK")
 
 
+def test_save_records_provider():
+    root = Path(tempfile.mkdtemp())
+    store = SessionStore(root=root)
+    store.save([("you", "q")], [{"role": "user", "content": "q"}], provider="openai")
+    data = json.loads(store.path.read_text())
+    assert data["provider"] == "openai"
+    # provider defaults to None when not supplied (older callers).
+    store2 = SessionStore(root=root)
+    store2.save([("you", "q")], [])
+    assert json.loads(store2.path.read_text())["provider"] is None
+    print("save records provider: OK")
+
+
+def test_provider_family_mapping():
+    assert provider_family("openai") == "openai"
+    assert provider_family("custom") == "openai"  # both use the OpenAI shape
+    assert provider_family("anthropic") == "anthropic"
+    assert provider_family("google") == "google"
+    assert provider_family(None) is None
+    assert provider_family("weird") is None
+    print("provider family mapping: OK")
+
+
+def test_sanitize_history_same_family_unchanged():
+    hist = [
+        {"role": "user", "content": "q"},
+        {"role": "assistant", "content": "a", "tool_calls": [{"id": "1"}]},
+        {"role": "tool", "tool_call_id": "1", "content": "result"},
+    ]
+    # openai <-> custom share a family: history is preserved verbatim.
+    out = sanitize_history(hist, "openai", "openai")
+    assert out == hist
+    # Unknown on both sides also counts as "same" -> unchanged.
+    assert sanitize_history(hist, None, None) == hist
+
+
+def test_sanitize_openai_history_to_anthropic():
+    # An OpenAI-shaped history (with a "tool" role) must not keep that role
+    # when adapted for Anthropic, which only accepts user/assistant.
+    hist = [
+        {"role": "user", "content": "what time is it?"},
+        {
+            "role": "assistant",
+            "content": "let me check",
+            "tool_calls": [
+                {
+                    "id": "c1",
+                    "type": "function",
+                    "function": {"name": "clock", "arguments": "{}"},
+                }
+            ],
+        },
+        {"role": "tool", "tool_call_id": "c1", "content": "12:00"},
+        {"role": "assistant", "content": "it is noon"},
+    ]
+    out = sanitize_history(hist, "openai", "anthropic")
+    # No forbidden role and every content is a plain string.
+    assert all(m["role"] in ("user", "assistant") for m in out)
+    assert all(isinstance(m["content"], str) for m in out)
+    flat = " ".join(m["content"] for m in out)
+    assert "what time is it?" in flat
+    assert "12:00" in flat  # the tool result survives as text
+    assert "it is noon" in flat
+
+
+def test_sanitize_anthropic_history_to_openai():
+    # Anthropic uses block lists and a user-role tool_result; flatten to strings.
+    hist = [
+        {"role": "user", "content": "hi"},
+        {
+            "role": "assistant",
+            "content": [
+                {"type": "text", "text": "calling"},
+                {"type": "tool_use", "id": "t1", "name": "echo", "input": {"x": 1}},
+            ],
+        },
+        {
+            "role": "user",
+            "content": [
+                {"type": "tool_result", "tool_use_id": "t1", "content": "done"}
+            ],
+        },
+    ]
+    out = sanitize_history(hist, "anthropic", "openai")
+    assert all(isinstance(m["content"], str) for m in out)
+    assert all(m["role"] in ("user", "assistant") for m in out)
+    flat = " ".join(m["content"] for m in out)
+    assert "echo" in flat and "done" in flat
+
+
+def _google_history():
+    return [
+        {
+            "role": "assistant",
+            "content": [
+                {"type": "function_call", "name": "search", "args": {"q": "x"}}
+            ],
+        },
+        {
+            "role": "tool",
+            "content": [
+                {
+                    "type": "function_response",
+                    "name": "search",
+                    "response": {"result": "found it"},
+                }
+            ],
+        },
+    ]
+
+
+def test_sanitize_google_history_to_openai():
+    out = sanitize_history(_google_history(), "google", "openai")
+    assert all(m["role"] in ("user", "assistant") for m in out)
+    assert all(isinstance(m["content"], str) for m in out)
+    flat = " ".join(m["content"] for m in out)
+    assert "search" in flat and "found it" in flat
+
+
+def test_sanitize_google_history_to_anthropic():
+    out = sanitize_history(_google_history(), "google", "anthropic")
+    assert all(m["role"] in ("user", "assistant") for m in out)
+    flat = " ".join(m["content"] for m in out)
+    assert "search" in flat and "found it" in flat
+
+
+def test_sanitize_coalesces_adjacent_roles():
+    # Two tool results in a row (both become user notes) must not produce two
+    # adjacent user messages, which some providers reject.
+    hist = [
+        {"role": "tool", "tool_call_id": "1", "content": "r1"},
+        {"role": "tool", "tool_call_id": "2", "content": "r2"},
+    ]
+    out = sanitize_history(hist, "openai", "anthropic")
+    assert len(out) == 1
+    assert out[0]["role"] == "user"
+    assert "r1" in out[0]["content"] and "r2" in out[0]["content"]
+
+
 def test_complete_slash():
     # command-name completion (unique -> trailing space)
     assert complete_slash("/sess") == "/sessions "
@@ -189,5 +330,13 @@ if __name__ == "__main__":
     test_list_sessions_empty_and_missing_root()
     test_open_existing_binds_to_same_file()
     test_sessions_root_env_override()
+    test_save_records_provider()
+    test_provider_family_mapping()
+    test_sanitize_history_same_family_unchanged()
+    test_sanitize_openai_history_to_anthropic()
+    test_sanitize_anthropic_history_to_openai()
+    test_sanitize_google_history_to_openai()
+    test_sanitize_google_history_to_anthropic()
+    test_sanitize_coalesces_adjacent_roles()
     test_complete_slash()
     print("\nALL session-store tests passed.")

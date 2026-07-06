@@ -21,11 +21,33 @@ from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any
 
-SESSIONS_VERSION = 1
+SESSIONS_VERSION = 2
 
 _CONV_NAME = "conversation.json"
 _DAY_FMT = "%Y-%m-%d"
 _TIME_FMT = "%H_%M_%S"
+
+#: Provider names collapsed to the wire *shape* their ``llm_history`` uses.
+#: "openai" and "custom" both speak the OpenAI chat shape, so they share a
+#: family and can resume each other's histories verbatim; "anthropic" and
+#: "google" each have their own incompatible message/tool shapes.
+_PROVIDER_FAMILY = {
+    "openai": "openai",
+    "custom": "openai",
+    "anthropic": "anthropic",
+    "google": "google",
+}
+
+
+def provider_family(provider: str | None) -> str | None:
+    """Map a provider name to its wire-shape family (see ``_PROVIDER_FAMILY``).
+
+    Unknown/absent providers return ``None`` so callers treat them as "family
+    not known" and fall back to sanitizing conservatively.
+    """
+    if not provider:
+        return None
+    return _PROVIDER_FAMILY.get(provider)
 
 # Message kinds that are part of the real conversation and therefore persisted.
 # Slash-command echoes/output use the "system" kind and are never saved. The
@@ -101,14 +123,22 @@ class SessionStore:
         self,
         messages: list[tuple[str, str]],
         llm_history: list[dict[str, Any]],
+        provider: str | None = None,
     ) -> None:
-        """Atomically (re)write the conversation file with the current state."""
+        """Atomically (re)write the conversation file with the current state.
+
+        ``provider`` is the name of the active LLM provider whose native message
+        shape ``llm_history`` is stored in. It is recorded so that resuming the
+        session under a different provider can detect the mismatch and sanitize
+        the history to a provider-neutral form (see :func:`sanitize_history`).
+        """
         self.dir.mkdir(parents=True, exist_ok=True)
         data = {
             "version": SESSIONS_VERSION,
             "session_id": self.session_id,
             "started_at": _iso(self.started_at),
             "updated_at": _iso(_utc_now()),
+            "provider": provider,
             "messages": [list(m) for m in persisted_messages(messages)],
             "llm_history": llm_history,
         }
@@ -193,6 +223,86 @@ def working_history(
         if isinstance(content, str) and content.lstrip().startswith(SUMMARY_MARKER):
             start = i
     return list(llm_history[start:])
+
+
+def _text_from_content(content: Any) -> str:
+    """Flatten any provider's message ``content`` to plain text.
+
+    ``content`` is either a string (OpenAI) or a list of provider-native blocks
+    (Anthropic / Google). Tool-call and tool-result blocks are rendered as short
+    human-readable summaries so the model keeps the gist of what happened without
+    any provider-specific structure surviving.
+    """
+    if isinstance(content, str):
+        return content
+    if not isinstance(content, list):
+        return ""
+    parts: list[str] = []
+    for block in content:
+        if not isinstance(block, dict):
+            continue
+        btype = block.get("type")
+        if btype == "text":
+            parts.append(str(block.get("text", "")))
+        elif btype in ("tool_use", "function_call"):
+            name = block.get("name", "?")
+            args = block.get("input", block.get("args", {}))
+            parts.append(f"[called tool {name} with {args}]")
+        elif btype == "tool_result":
+            parts.append(f"[tool result] {block.get('content', '')}")
+        elif btype == "function_response":
+            resp = block.get("response", {})
+            result = resp.get("result", resp) if isinstance(resp, dict) else resp
+            parts.append(f"[tool result] {result}")
+    return "\n".join(p for p in parts if p).strip()
+
+
+def sanitize_history(
+    llm_history: list[dict[str, Any]],
+    stored_family: str | None,
+    target_family: str | None,
+) -> list[dict[str, Any]]:
+    """Make a stored ``llm_history`` safe to replay under ``target_family``.
+
+    Each provider serializes tool calls/results into its own message shape
+    (e.g. OpenAI uses a ``"tool"`` role; Anthropic uses ``user``/``assistant``
+    with ``tool_use``/``tool_result`` blocks). Replaying one provider's shape to
+    another's API is rejected (e.g. Anthropic errors on the ``"tool"`` role).
+
+    When the stored and target families match (including both unknown) the
+    history is returned unchanged, preserving full tool round-trips. Otherwise
+    every message is flattened to a provider-neutral ``user``/``assistant``
+    message whose content is a plain string: tool-result turns become ``user``
+    notes and tool-call/assistant turns keep their text (with a short summary of
+    any calls). This loses the raw tool structure but keeps the conversation
+    resumable across providers.
+    """
+    if stored_family == target_family:
+        return list(llm_history)
+
+    neutral: list[dict[str, Any]] = []
+    for msg in llm_history:
+        if not isinstance(msg, dict):
+            continue
+        role = msg.get("role")
+        text = _text_from_content(msg.get("content"))
+        # A tool-result turn (OpenAI/Google "tool" role, or Anthropic "user"
+        # with tool_result blocks) is folded into a user-visible note so the
+        # neutral history only ever uses the universally accepted user/assistant
+        # roles.
+        if role == "assistant":
+            out_role = "assistant"
+        else:
+            out_role = "user"
+        if not text:
+            continue
+        # Coalesce consecutive same-role messages so we don't emit empty or
+        # role-adjacent fragments that some providers reject.
+        if neutral and neutral[-1]["role"] == out_role:
+            neutral[-1]["content"] += "\n\n" + text
+        else:
+            neutral.append({"role": out_role, "content": text})
+    return neutral
 
 
 # -- slash commands ---------------------------------------------------------

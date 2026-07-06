@@ -43,6 +43,8 @@ from .session import (
     complete_slash,
     list_sessions,
     load_session,
+    provider_family,
+    sanitize_history,
     working_history,
 )
 from .llm import ToolSpec
@@ -912,8 +914,12 @@ class Ludvart:
         messages = (
             self._panel.messages if self._panel is not None else self._panel_messages
         )
+        # Record which provider's native shape llm_history is in, so a later
+        # resume under a different provider can adapt it. getattr keeps this
+        # robust if llm is a lightweight stub without a name.
+        provider = getattr(self.llm, "name", None)
         try:
-            self._session.save(messages, self._llm_history)
+            self._session.save(messages, self._llm_history, provider=provider)
         except Exception:
             pass
 
@@ -1133,12 +1139,26 @@ class Ludvart:
             panel.add_system(f"Could not load session: {session_id}")
             return
         messages = [tuple(m) for m in data.get("messages", [])]
-        self._llm_history = working_history(list(data.get("llm_history", [])))
+        history = working_history(list(data.get("llm_history", [])))
+        # The stored llm_history is in the shape of whichever provider recorded
+        # it. Resuming under a different provider family would replay an
+        # incompatible message shape (e.g. an OpenAI "tool" role to Anthropic,
+        # which errors), so flatten to a neutral form when the families differ.
+        stored_family = provider_family(data.get("provider"))
+        target_family = provider_family(getattr(self.llm, "name", None))
+        sanitized = sanitize_history(history, stored_family, target_family)
+        converted = stored_family != target_family and len(sanitized) != len(history)
+        self._llm_history = sanitized
         self._panel_messages = messages
         panel.restore(messages)
         # Continue writing into the loaded session's file from now on.
         self._session = SessionStore.open_existing(session_id)
-        panel.add_system(f"Loaded session {session_id} ({len(messages)} msgs).")
+        note = ""
+        if converted:
+            note = " (history adapted from a different provider)"
+        panel.add_system(
+            f"Loaded session {session_id} ({len(messages)} msgs).{note}"
+        )
 
     def _start_ask(
         self, question: str, *, user_echo: str | None = None, info: str | None = None
