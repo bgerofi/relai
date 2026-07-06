@@ -293,6 +293,152 @@ def test_sanitize_coalesces_adjacent_roles():
     assert "r1" in out[0]["content"] and "r2" in out[0]["content"]
 
 
+# -- cross-provider save -> load matrix --------------------------------------
+
+# One representative native history per provider family. Each carries a
+# recognizable marker plus a tool-call/tool-result pair in that provider's shape.
+_NATIVE_HISTORY = {
+    "openai": [
+        {"role": "user", "content": "openai-marker: what time is it?"},
+        {
+            "role": "assistant",
+            "content": "checking",
+            "tool_calls": [
+                {
+                    "id": "c1",
+                    "type": "function",
+                    "function": {"name": "clock", "arguments": "{}"},
+                }
+            ],
+        },
+        {"role": "tool", "tool_call_id": "c1", "content": "openai-result-noon"},
+        {"role": "assistant", "content": "it is noon"},
+    ],
+    "anthropic": [
+        {"role": "user", "content": "anthropic-marker: hi"},
+        {
+            "role": "assistant",
+            "content": [
+                {"type": "text", "text": "calling"},
+                {"type": "tool_use", "id": "t1", "name": "echo", "input": {"x": 1}},
+            ],
+        },
+        {
+            "role": "user",
+            "content": [
+                {
+                    "type": "tool_result",
+                    "tool_use_id": "t1",
+                    "content": "anthropic-result-done",
+                }
+            ],
+        },
+    ],
+    "google": [
+        {"role": "user", "content": "google-marker: search please"},
+        {
+            "role": "assistant",
+            "content": [
+                {"type": "function_call", "name": "search", "args": {"q": "x"}}
+            ],
+        },
+        {
+            "role": "tool",
+            "content": [
+                {
+                    "type": "function_response",
+                    "name": "search",
+                    "response": {"result": "google-result-found"},
+                }
+            ],
+        },
+    ],
+}
+
+# Which stored provider name to write for each family (custom shares openai).
+_PROVIDER_NAME = {"openai": "custom", "anthropic": "anthropic", "google": "google"}
+_MARKER = {
+    "openai": ("openai-marker", "openai-result-noon"),
+    "anthropic": ("anthropic-marker", "anthropic-result-done"),
+    "google": ("google-marker", "google-result-found"),
+}
+
+
+def _resume_like_load_session(stored_provider, target_provider, history):
+    """Mirror Ludvart._load_session's family-adaptation step exactly."""
+    stored_family = provider_family(stored_provider)
+    target_family = provider_family(target_provider)
+    sanitized = sanitize_history(history, stored_family, target_family)
+    converted = (
+        stored_family is not None
+        and target_family is not None
+        and stored_family != target_family
+    )
+    return sanitized, converted
+
+
+def test_cross_provider_save_load_matrix():
+    """Every (stored provider) x (resume provider) combination round-trips.
+
+    Saves a native history with SessionStore, reloads it, then applies the same
+    family-adaptation _load_session does. Same-family resumes keep the native
+    shape; cross-family resumes flatten to plain user/assistant strings while
+    preserving the conversation markers (including tool results).
+    """
+    root = Path(tempfile.mkdtemp())
+    families = ["openai", "anthropic", "google"]
+    for stored_fam in families:
+        # Persist a session recorded by this provider.
+        store = SessionStore(root=root)
+        store.save(
+            [("you", "hi")],
+            _NATIVE_HISTORY[stored_fam],
+            provider=_PROVIDER_NAME[stored_fam],
+        )
+        data = json.loads(store.path.read_text())
+        history = list(data["llm_history"])
+
+        for target_fam in families:
+            target_provider = _PROVIDER_NAME[target_fam]
+            out, converted = _resume_like_load_session(
+                data["provider"], target_provider, history
+            )
+            user_marker, result_marker = _MARKER[stored_fam]
+
+            if stored_fam == target_fam:
+                # Same family (incl. openai<->custom): native shape preserved.
+                assert out == history, (stored_fam, target_fam, out)
+                assert converted is False
+            else:
+                # Cross family: flat user/assistant, plain-string content only,
+                # no forbidden roles, and the markers survive as text.
+                assert converted is True, (stored_fam, target_fam)
+                assert all(m["role"] in ("user", "assistant") for m in out), out
+                assert all(isinstance(m["content"], str) for m in out), out
+                flat = " ".join(m["content"] for m in out)
+                assert user_marker in flat, (stored_fam, target_fam, flat)
+                assert result_marker in flat, (stored_fam, target_fam, flat)
+    print("cross-provider save/load matrix: OK")
+
+
+def test_openai_custom_same_family_roundtrip():
+    """openai and custom share a family, so resuming across them is verbatim."""
+    root = Path(tempfile.mkdtemp())
+    store = SessionStore(root=root)
+    store.save([("you", "hi")], _NATIVE_HISTORY["openai"], provider="openai")
+    data = json.loads(store.path.read_text())
+    history = list(data["llm_history"])
+    # Stored under "openai", resumed under "custom": no conversion.
+    out, converted = _resume_like_load_session("openai", "custom", history)
+    assert out == history
+    assert converted is False
+    # And the reverse direction too.
+    out2, converted2 = _resume_like_load_session("custom", "openai", history)
+    assert out2 == history
+    assert converted2 is False
+    print("openai/custom same-family roundtrip: OK")
+
+
 def test_complete_slash():
     # command-name completion (unique -> trailing space)
     assert complete_slash("/sess") == "/sessions "
@@ -338,5 +484,7 @@ if __name__ == "__main__":
     test_sanitize_google_history_to_openai()
     test_sanitize_google_history_to_anthropic()
     test_sanitize_coalesces_adjacent_roles()
+    test_cross_provider_save_load_matrix()
+    test_openai_custom_same_family_roundtrip()
     test_complete_slash()
     print("\nALL session-store tests passed.")

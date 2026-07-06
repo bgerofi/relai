@@ -1147,7 +1147,13 @@ class Ludvart:
         stored_family = provider_family(data.get("provider"))
         target_family = provider_family(getattr(self.llm, "name", None))
         sanitized = sanitize_history(history, stored_family, target_family)
-        converted = stored_family != target_family and len(sanitized) != len(history)
+        # sanitize_history flattens to a neutral shape whenever both families
+        # are known and differ; an unknown family on either side is left as-is.
+        converted = (
+            stored_family is not None
+            and target_family is not None
+            and stored_family != target_family
+        )
         self._llm_history = sanitized
         self._panel_messages = messages
         panel.restore(messages)
