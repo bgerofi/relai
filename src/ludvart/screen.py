@@ -158,6 +158,16 @@ class LudvartScreen(pyte.HistoryScreen):
         if kwargs.get("private") and _ALT_SCREEN_MODES.intersection(modes):
             self._leave_alt_screen()
 
+    def select_graphic_rendition(self, *attrs, **kwargs) -> None:
+        # pyte dispatches CSI sequences carrying a private marker (e.g. the
+        # ``\x1b[?...m`` / ``\x1b[>...m`` variants some full-screen apps such as
+        # vim emit) with ``private=True``, but pyte's own
+        # ``select_graphic_rendition`` does not accept that keyword and would
+        # raise ``TypeError``. Swallow it -- private SGR variants have no
+        # standard meaning for our model, so we treat them as a normal SGR.
+        kwargs.pop("private", None)
+        super().select_graphic_rendition(*attrs, **kwargs)
+
     def _enter_alt_screen(self) -> None:
         if self.in_alt_screen:
             return
