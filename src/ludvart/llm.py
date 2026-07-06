@@ -633,9 +633,11 @@ _DEFAULT_CONTEXT_WINDOWS: tuple[tuple[str, int], ...] = (
     ("claude", 200_000),
     # OpenAI (the standard API does not report context size).
     # The GPT-5 family (incl. the "*-codex" variants like gpt-5-codex /
-    # gpt-5.x-codex used via GitHub Copilot) has a 400k-token window; it must
-    # come before the gpt-4 entries so those substrings don't shadow it.
-    ("gpt-5", 400_000),
+    # gpt-5.x-codex used via GitHub Copilot). Nominally 400k, but the usable
+    # window is smaller in practice (Codex overflows near the top), so we set a
+    # 350k fallback. It must come before the gpt-4 entries so those substrings
+    # don't shadow it.
+    ("gpt-5", 350_000),
     ("gpt-4.1", 1_047_576),
     ("gpt-4o", 128_000),
     ("gpt-4-turbo", 128_000),

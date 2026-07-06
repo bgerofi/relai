@@ -60,22 +60,36 @@ def build(name, model, context_window=0):
 
 
 def test_known_table():
-    assert _known_context_window("claude-opus-4-6") == 1_000_000  # Claude 4 = 1M
-    assert _known_context_window("claude-3-5-sonnet") == 200_000  # older = 200k
-    assert _known_context_window("gpt-4o-mini") == 128_000
-    assert _known_context_window("gpt-4-turbo-2024") == 128_000
-    assert _known_context_window("gpt-4") == 8_192
-    assert _known_context_window("gpt-3.5-turbo") == 16_385
-    # GPT-5 family, including the Copilot "*-codex" variants (gpt-5.x-codex).
-    assert _known_context_window("gpt-5") == 400_000
-    assert _known_context_window("gpt-5-codex") == 400_000
-    assert _known_context_window("github_copilot/gpt-5.3-codex") == 400_000
-    assert _known_context_window("gpt-5-mini") == 400_000
-    assert _known_context_window("gemini-1.5-pro-latest") == 2_097_152
-    assert _known_context_window("gemini-2.0-flash") == 1_048_576
-    assert _known_context_window("o3-mini") == 200_000
-    assert _known_context_window("some-unknown-model") == 0
-    assert _known_context_window("") == 0
+    # Isolate from any real ~/.ludvart/context_windows.json so this exercises the
+    # built-in defaults regardless of the developer's local edits.
+    with tempfile.TemporaryDirectory() as d:
+        path = os.path.join(d, "context_windows.json")
+        prev = os.environ.get("LUDVART_CONTEXT_WINDOWS")
+        os.environ["LUDVART_CONTEXT_WINDOWS"] = path
+        try:
+            ensure_context_windows_file()  # write the defaults into the temp file
+            assert _known_context_window("claude-opus-4-6") == 1_000_000  # Claude 4 = 1M
+            assert _known_context_window("claude-3-5-sonnet") == 200_000  # older = 200k
+            assert _known_context_window("gpt-4o-mini") == 128_000
+            assert _known_context_window("gpt-4-turbo-2024") == 128_000
+            assert _known_context_window("gpt-4") == 8_192
+            assert _known_context_window("gpt-3.5-turbo") == 16_385
+            # GPT-5 family, including the Copilot "*-codex" variants (gpt-5.x-codex).
+            # 350k, not the nominal 400k: the usable window is smaller in practice.
+            assert _known_context_window("gpt-5") == 350_000
+            assert _known_context_window("gpt-5-codex") == 350_000
+            assert _known_context_window("github_copilot/gpt-5.3-codex") == 350_000
+            assert _known_context_window("gpt-5-mini") == 350_000
+            assert _known_context_window("gemini-1.5-pro-latest") == 2_097_152
+            assert _known_context_window("gemini-2.0-flash") == 1_048_576
+            assert _known_context_window("o3-mini") == 200_000
+            assert _known_context_window("some-unknown-model") == 0
+            assert _known_context_window("") == 0
+        finally:
+            if prev is None:
+                os.environ.pop("LUDVART_CONTEXT_WINDOWS", None)
+            else:
+                os.environ["LUDVART_CONTEXT_WINDOWS"] = prev
     print("known-model table: OK")
 
 
