@@ -5,6 +5,7 @@ from __future__ import annotations
 import argparse
 import getpass
 import os
+import signal
 import sys
 from typing import TYPE_CHECKING
 
@@ -43,6 +44,37 @@ def _parse_prefix(spec: str) -> bytes:
     raise argparse.ArgumentTypeError(
         f"invalid prefix {spec!r}; use e.g. 'C-g', 'ctrl-g', '^g', or '\\x07'"
     )
+
+
+def _install_gateway_shutdown_handlers(get_gateway):
+    """Install best effort signal handlers that stop a running gateway."""
+    handlers = []
+
+    def _handler(signum, _frame):
+        gw = get_gateway()
+        if gw is not None:
+            gw.stop()
+        raise SystemExit(128 + int(signum))
+
+    for sig_name in ("SIGTERM", "SIGHUP"):
+        sig = getattr(signal, sig_name, None)
+        if sig is None:
+            continue
+        try:
+            prev = signal.getsignal(sig)
+            signal.signal(sig, _handler)
+            handlers.append((sig, prev))
+        except Exception:
+            pass
+    return handlers
+
+
+def _restore_handlers(handlers) -> None:
+    for sig, prev in handlers:
+        try:
+            signal.signal(sig, prev)
+        except Exception:
+            pass
 
 
 def main(argv: list[str] | None = None) -> int:
@@ -89,6 +121,7 @@ def main(argv: list[str] | None = None) -> int:
     if not args.no_llm:
         llm, gateway = _setup_llm()
 
+    handlers = _install_gateway_shutdown_handlers(lambda: gateway)
     try:
         return Ludvart(command, prefix=args.prefix, llm=llm).run()
     except KeyboardInterrupt:
@@ -96,6 +129,7 @@ def main(argv: list[str] | None = None) -> int:
     finally:
         if gateway is not None:
             gateway.stop()
+        _restore_handlers(handlers)
 
 
 def _setup_llm(

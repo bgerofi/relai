@@ -17,6 +17,7 @@ be reused here.
 from __future__ import annotations
 
 import contextlib
+import ctypes
 import os
 import shutil
 import signal
@@ -152,6 +153,24 @@ def _free_port(host: str) -> int:
         return sock.getsockname()[1]
 
 
+def _linux_set_pdeathsig() -> None:
+    """Best effort: ask Linux to signal this child if parent dies."""
+    if not sys.platform.startswith("linux"):
+        return
+    try:
+        libc = ctypes.CDLL(None, use_errno=True)
+        prctl = libc.prctl
+        prctl.argtypes = [ctypes.c_int, ctypes.c_ulong, ctypes.c_ulong, ctypes.c_ulong, ctypes.c_ulong]
+        prctl.restype = ctypes.c_int
+        PR_SET_PDEATHSIG = 1
+        if prctl(PR_SET_PDEATHSIG, int(signal.SIGTERM), 0, 0, 0) != 0:
+            raise OSError(ctypes.get_errno(), "prctl(PR_SET_PDEATHSIG) failed")
+        if os.getppid() == 1:
+            os.kill(os.getpid(), signal.SIGTERM)
+    except Exception:
+        pass
+
+
 class CopilotGateway:
     """A local ``litellm`` proxy fronting GitHub Copilot for ludvart.
 
@@ -213,6 +232,7 @@ class CopilotGateway:
                 stderr=logf,
                 stdin=subprocess.DEVNULL,
                 start_new_session=True,
+                preexec_fn=_linux_set_pdeathsig if sys.platform.startswith("linux") else None,
             )
         self._await_ready(timeout)
 
