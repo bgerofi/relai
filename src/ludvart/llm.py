@@ -1152,6 +1152,14 @@ class OpenAIClient(LLMClient):
             )
         assistant_message: Message = {"role": "assistant", "content": text}
         if assistant_calls:
+            # Some gateways (notably LiteLLM's github_copilot path, which
+            # replays to the OpenAI Responses API) drop an assistant message
+            # whose content is empty, taking its tool_call items with it and
+            # orphaning the following tool results ("No tool call found for
+            # function call output"). Keep the content non-empty so the
+            # tool_calls always survive the round-trip. This does not affect the
+            # user-visible reply, which is carried separately in ``text``.
+            assistant_message["content"] = text or " "
             assistant_message["tool_calls"] = assistant_calls
         return Turn(
             text=text,
