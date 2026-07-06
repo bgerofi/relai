@@ -6,7 +6,7 @@ gateway lifecycle is exercised against a tiny fake ``litellm`` CLI stub, so no
 real GitHub Copilot subscription or network access is required.
 
 Run:
-    cd /local_home/bgerofi1/src/relai && source .venv/bin/activate \
+    cd /local_home/bgerofi1/src/ludvart && source .venv/bin/activate \
         && python tools/test_copilot_gateway.py
 """
 
@@ -18,9 +18,9 @@ import time
 import urllib.error
 import urllib.request
 
-from relai import gateway
-from relai.gateway import GATEWAY_API_KEY, CopilotGateway, GatewayError
-from relai.llm import _load_conf, copilot_provider_config, write_copilot_conf
+from ludvart import gateway
+from ludvart.gateway import GATEWAY_API_KEY, CopilotGateway, GatewayError
+from ludvart.llm import _load_conf, copilot_provider_config, write_copilot_conf
 
 
 # A stand-in for the real `litellm` proxy: serves 200 on /health/liveliness so
@@ -150,7 +150,7 @@ def test_missing_cli_raises(tmp, monkeypatch_cli):
 def test_choose_copilot_model(tmp):
     import builtins
 
-    from relai import __main__ as m
+    from ludvart import __main__ as m
 
     orig_list = gateway.list_copilot_models
     orig_input = builtins.input

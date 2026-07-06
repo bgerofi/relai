@@ -1,21 +1,21 @@
 """Bracketed-paste routing test for the AI panel input.
 
-Exercises Relai._panel_input directly (no PTY): a paste split across reads and
+Exercises Ludvart._panel_input directly (no PTY): a paste split across reads and
 containing a newline must be inserted verbatim (newline folded to a space) into
 the editor without submitting, and trailing bytes after the end marker are
 processed as normal keys.
 
 Run:
-    cd /local_home/bgerofi1/src/relai && source .venv/bin/activate \
+    cd /local_home/bgerofi1/src/ludvart && source .venv/bin/activate \
         && python tools/test_ai_paste.py
 """
 
-from relai.relai import Relai, _PASTE_START, _PASTE_END
-from relai.panel import AiPanel
+from ludvart.ludvart import Ludvart, _PASTE_START, _PASTE_END
+from ludvart.panel import AiPanel
 
 
-def make_relai():
-    r = Relai(["true"])
+def make_ludvart():
+    r = Ludvart(["true"])
     r._panel = AiPanel(cols=40, height=8, provider="test")
     r._panel_pasting = False
     r._panel_pastebuf = bytearray()
@@ -23,7 +23,7 @@ def make_relai():
 
 
 def test_paste_single_read():
-    r = make_relai()
+    r = make_ludvart()
     r._panel_input(_PASTE_START + b"hello world" + _PASTE_END)
     assert r._panel.editor.text == "hello world", r._panel.editor.text
     assert not r._panel_pasting
@@ -31,7 +31,7 @@ def test_paste_single_read():
 
 
 def test_paste_with_newline_no_submit():
-    r = make_relai()
+    r = make_ludvart()
     submitted = []
     r._panel_submit = lambda: submitted.append(True)
     r._panel_input(_PASTE_START + b"line1\nline2" + _PASTE_END)
@@ -41,7 +41,7 @@ def test_paste_with_newline_no_submit():
 
 
 def test_paste_split_across_reads():
-    r = make_relai()
+    r = make_ludvart()
     # Start marker + first chunk in one read, remainder + end marker in another,
     # with the END marker itself split across the two reads.
     part1 = _PASTE_START + b"abc"
@@ -58,7 +58,7 @@ def test_paste_split_across_reads():
 
 
 def test_prefix_before_paste():
-    r = make_relai()
+    r = make_ludvart()
     r._panel_input(b"hi " + _PASTE_START + b"there" + _PASTE_END)
     assert r._panel.editor.text == "hi there", r._panel.editor.text
     print("text before paste: OK")

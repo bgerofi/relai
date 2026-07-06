@@ -1,12 +1,12 @@
 """Tests for streamed interim narration.
 
-While the model produces a turn, relai streams its text into a transient,
+While the model produces a turn, ludvart streams its text into a transient,
 dim "interim" line above the spinner (an indication of what it is doing), then
 removes it once the final reply arrives. These tests cover:
 
   * the LLM ``converse(..., on_text=...)`` streaming hook (base + Anthropic),
   * the panel rendering the interim line while thinking, and
-  * relai wiring: interim is refreshed per turn and cleared on completion.
+  * ludvart wiring: interim is refreshed per turn and cleared on completion.
 """
 
 import os
@@ -16,7 +16,7 @@ from types import SimpleNamespace
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1] / "src"))
 
-from relai.llm import (  # noqa: E402
+from ludvart.llm import (  # noqa: E402
     AnthropicClient,
     LLMClient,
     ProviderConfig,
@@ -25,9 +25,9 @@ from relai.llm import (  # noqa: E402
     Turn,
     usage_from_response,
 )
-from relai.panel import AiPanel  # noqa: E402
-from relai.relai import Relai  # noqa: E402
-from relai.session import SessionStore  # noqa: E402
+from ludvart.panel import AiPanel  # noqa: E402
+from ludvart.ludvart import Ludvart  # noqa: E402
+from ludvart.session import SessionStore  # noqa: E402
 
 
 # -- base converse feeds on_text -------------------------------------------
@@ -154,7 +154,7 @@ def test_panel_renders_interim_line():
     print("panel renders interim line: OK")
 
 
-# -- relai wiring: interim refreshed per turn, cleared on finish -----------
+# -- ludvart wiring: interim refreshed per turn, cleared on finish -----------
 
 
 class _StreamingLLM:
@@ -162,9 +162,9 @@ class _StreamingLLM:
     model = "m"
     context_window = 1000
 
-    def __init__(self, relai):
+    def __init__(self, ludvart):
         self.on_retry = None
-        self._relai = relai
+        self._ludvart = ludvart
         self.turn = 0
         self.interim_at_entry = []
 
@@ -172,7 +172,7 @@ class _StreamingLLM:
         self.turn += 1
         # Record the interim value the harness left when this turn begins; the
         # agent loop must reset it to "" before every turn.
-        self.interim_at_entry.append(self._relai._panel.interim)
+        self.interim_at_entry.append(self._ludvart._panel.interim)
         if self.turn == 1:
             if on_text:
                 on_text("step one")
@@ -196,9 +196,9 @@ class _StreamingLLM:
         return {"role": "user", "content": content}
 
 
-def _make_relai(root: Path) -> Relai:
-    os.environ["RELAI_SESSIONS_DIR"] = str(root)
-    r = Relai(["true"])
+def _make_ludvart(root: Path) -> Ludvart:
+    os.environ["LUDVART_SESSIONS_DIR"] = str(root)
+    r = Ludvart(["true"])
     r._panel = AiPanel(cols=80, height=8, provider="fake")
     r._phys_rows, r._phys_cols = 24, 80
     r._render_split = lambda: None
@@ -208,8 +208,8 @@ def _make_relai(root: Path) -> Relai:
     return r
 
 
-def test_relai_streams_and_clears_interim(tmp_path: Path):
-    r = _make_relai(tmp_path)
+def test_ludvart_streams_and_clears_interim(tmp_path: Path):
+    r = _make_ludvart(tmp_path)
     panel = r._panel
 
     result = r._ask_llm("what is on screen?")
@@ -234,8 +234,8 @@ def test_relai_streams_and_clears_interim(tmp_path: Path):
     r._ask_thread = None
     r._finish_ask()
     assert panel.interim == "", panel.interim
-    assert panel.messages[-1] == ("relai", "final answer is 42"), panel.messages[-1]
-    print("relai streams and clears interim: OK")
+    assert panel.messages[-1] == ("ludvart", "final answer is 42"), panel.messages[-1]
+    print("ludvart streams and clears interim: OK")
 
 
 def main():
@@ -246,7 +246,7 @@ def main():
     test_anthropic_non_stream_unchanged()
     test_panel_renders_interim_line()
     with tempfile.TemporaryDirectory() as d:
-        test_relai_streams_and_clears_interim(Path(d))
+        test_ludvart_streams_and_clears_interim(Path(d))
     print("ALL streaming/interim tests passed.")
 
 

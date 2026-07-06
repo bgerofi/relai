@@ -1,10 +1,10 @@
 """Persistent conversation storage and in-panel slash commands.
 
-Every relai run that opens the AI panel starts a *session*: a timestamped
-directory under ``~/.relai/sessions/`` holding a ``conversation.json`` file that
+Every ludvart run that opens the AI panel starts a *session*: a timestamped
+directory under ``~/.ludvart/sessions/`` holding a ``conversation.json`` file that
 is (re)written as the conversation grows. The layout is::
 
-    ~/.relai/sessions/YYYY-MM-DD/HH_MM_SS/conversation.json
+    ~/.ludvart/sessions/YYYY-MM-DD/HH_MM_SS/conversation.json
 
 where the date and time are UTC. A new session is created the first time the
 panel is opened in a process; subsequent opens in the same process keep
@@ -30,8 +30,8 @@ _TIME_FMT = "%H_%M_%S"
 # Message kinds that are part of the real conversation and therefore persisted.
 # Slash-command echoes/output use the "system" kind and are never saved. The
 # "summary" kind marks an automatic context-compaction point (see the compaction
-# logic in :mod:`relai`).
-_PERSISTED_KINDS = ("you", "relai", "info", "summary")
+# logic in :mod:`ludvart`).
+_PERSISTED_KINDS = ("you", "ludvart", "info", "summary")
 
 # Text marker wrapping a compaction summary in the model-facing ``llm_history``.
 # It is ordinary message content (safe to send to any provider) and lets us find
@@ -43,13 +43,13 @@ SUMMARY_MARKER_END = "</conversationSummary>"
 def sessions_root() -> Path:
     """Return the root directory that holds all session folders.
 
-    Honours ``RELAI_SESSIONS_DIR`` (used by tests) and otherwise defaults to
-    ``~/.relai/sessions``.
+    Honours ``LUDVART_SESSIONS_DIR`` (used by tests) and otherwise defaults to
+    ``~/.ludvart/sessions``.
     """
-    override = os.environ.get("RELAI_SESSIONS_DIR")
+    override = os.environ.get("LUDVART_SESSIONS_DIR")
     if override:
         return Path(override)
-    return Path(os.path.expanduser("~/.relai/sessions"))
+    return Path(os.path.expanduser("~/.ludvart/sessions"))
 
 
 def _utc_now() -> datetime:
@@ -218,12 +218,12 @@ SLASH_COMMAND_HELP: list[tuple[str, str]] = [
     ),
     (
         "/init_helpers",
-        "Install or verify ~/.relai/bin/relai_helper on the foreground host "
+        "Install or verify ~/.ludvart/bin/ludvart_helper on the foreground host "
         "(for precise file read/edit/search).",
     ),
     (
         "/mcp_refresh",
-        "Reconnect to the MCP servers in ~/.relai/mcp.json and refresh their "
+        "Reconnect to the MCP servers in ~/.ludvart/mcp.json and refresh their "
         "tool definitions.",
     ),
     ("/sessions list", "List saved conversation sessions (current is marked *)."),

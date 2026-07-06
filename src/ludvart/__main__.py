@@ -1,4 +1,4 @@
-"""Command-line entry point for relai."""
+"""Command-line entry point for ludvart."""
 
 from __future__ import annotations
 
@@ -20,7 +20,7 @@ from .llm import (
     write_copilot_conf,
     write_provider_conf,
 )
-from .relai import DEFAULT_PREFIX, Relai
+from .ludvart import DEFAULT_PREFIX, Ludvart
 
 if TYPE_CHECKING:
     from .gateway import CopilotGateway
@@ -47,13 +47,13 @@ def _parse_prefix(spec: str) -> bytes:
 
 def main(argv: list[str] | None = None) -> int:
     parser = argparse.ArgumentParser(
-        prog="relai",
+        prog="ludvart",
         description=(
             "PTY-level relay: spawn a command and interact with it transparently. "
             "With no command, spawns your $SHELL."
         ),
         epilog=(
-            "Everything after '--' is the command to run, e.g.  relai -- htop. "
+            "Everything after '--' is the command to run, e.g.  ludvart -- htop. "
             "Inside a session, press the prefix key (default Ctrl-G) then 's' to "
             "open the scrollback viewer; press the prefix twice to send it literally."
         ),
@@ -63,7 +63,7 @@ def main(argv: list[str] | None = None) -> int:
         type=_parse_prefix,
         default=DEFAULT_PREFIX,
         metavar="KEY",
-        help="Prefix key for relai commands, e.g. 'C-g' (default), 'ctrl-o', '^b'.",
+        help="Prefix key for ludvart commands, e.g. 'C-g' (default), 'ctrl-o', '^b'.",
     )
     parser.add_argument(
         "--no-llm",
@@ -78,7 +78,7 @@ def main(argv: list[str] | None = None) -> int:
     args = parser.parse_args(argv)
 
     command = args.command
-    # argparse.REMAINDER keeps a leading '--' if the user wrote 'relai -- cmd'.
+    # argparse.REMAINDER keeps a leading '--' if the user wrote 'ludvart -- cmd'.
     if command and command[0] == "--":
         command = command[1:]
     if not command:
@@ -90,7 +90,7 @@ def main(argv: list[str] | None = None) -> int:
         llm, gateway = _setup_llm()
 
     try:
-        return Relai(command, prefix=args.prefix, llm=llm).run()
+        return Ludvart(command, prefix=args.prefix, llm=llm).run()
     except KeyboardInterrupt:
         return 130
     finally:
@@ -104,14 +104,14 @@ def _setup_llm(
     """Resolve and verify an LLM backend, running first-time setup if needed.
 
     Reuses existing configuration whenever it is present -- provider variables
-    from the environment or ``~/.relai/llm.conf``, or a saved GitHub Copilot
+    from the environment or ``~/.ludvart/llm.conf``, or a saved GitHub Copilot
     gateway. If nothing is configured and the session is interactive, it asks a
-    few questions, saves them to ``~/.relai/llm.conf``, and continues.
+    few questions, saves them to ``~/.ludvart/llm.conf``, and continues.
 
     Returns ``(client, gateway)``. ``gateway`` is a running
-    :class:`~relai.gateway.CopilotGateway` that the caller must ``stop()`` on
+    :class:`~ludvart.gateway.CopilotGateway` that the caller must ``stop()`` on
     shutdown (``None`` for direct providers). ``client`` is ``None`` when no
-    backend is configured, meaning relai runs as a plain relay.
+    backend is configured, meaning ludvart runs as a plain relay.
     """
     # Seed the editable context-window table on first run so users can tune it.
     ensure_context_windows_file()
@@ -127,22 +127,22 @@ def _setup_llm(
             return None, None
         client, gateway = _resolve_client()
         if client is None:
-            sys.stderr.write("relai: configuration still incomplete.\n")
+            sys.stderr.write("ludvart: configuration still incomplete.\n")
 
-    sys.stderr.write(f"relai: verifying {client.name} model {client.model!r}... ")
+    sys.stderr.write(f"ludvart: verifying {client.name} model {client.model!r}... ")
     sys.stderr.flush()
     try:
         client.verify()
     except LLMError as exc:
         sys.stderr.write("FAILED\n")
-        sys.stderr.write(f"relai: LLM check failed: {exc}\n")
+        sys.stderr.write(f"ludvart: LLM check failed: {exc}\n")
         if gateway is not None:
             gateway.stop()
         if sys.stdin.isatty() and _ask_yes_no(
-            "relai: re-enter the LLM settings now?", default=True
+            "ludvart: re-enter the LLM settings now?", default=True
         ):
             return _setup_llm(force_wizard=True)
-        sys.stderr.write("relai: fix the configuration or pass --no-llm.\n")
+        sys.stderr.write("ludvart: fix the configuration or pass --no-llm.\n")
         sys.exit(2)
     sys.stderr.write("ok\n")
     return client, gateway
@@ -150,9 +150,9 @@ def _setup_llm(
 
 def _report_plain_relay() -> None:
     sys.stderr.write(
-        "relai: no LLM provider configured. Running as a plain relay.\n"
+        "ludvart: no LLM provider configured. Running as a plain relay.\n"
         "       Set {OPENAI,ANTHROPIC,GOOGLE,CUSTOM}_API_URL/_API_KEY/_MODEL,\n"
-        "       or edit ~/.relai/llm.conf, or pass --no-llm.\n"
+        "       or edit ~/.ludvart/llm.conf, or pass --no-llm.\n"
     )
 
 
@@ -199,7 +199,7 @@ def _start_copilot(
 
     if not litellm_available():
         sys.stderr.write(
-            "relai: GitHub Copilot is configured but the LiteLLM gateway isn't\n"
+            "ludvart: GitHub Copilot is configured but the LiteLLM gateway isn't\n"
             "       installed. Re-run ./setup.sh, or: uv pip install 'litellm[proxy]'\n"
         )
         return None, None
@@ -207,28 +207,28 @@ def _start_copilot(
     if not copilot_authenticated():
         if not (sys.stdin.isatty() and sys.stdout.isatty()):
             sys.stderr.write(
-                "relai: GitHub Copilot needs authorization; run relai in a "
+                "ludvart: GitHub Copilot needs authorization; run ludvart in a "
                 "terminal once to set it up.\n"
             )
             return None, None
-        sys.stderr.write("relai: authorizing GitHub Copilot...\n")
+        sys.stderr.write("ludvart: authorizing GitHub Copilot...\n")
         sys.stderr.flush()
         try:
             authenticate_copilot()
         except GatewayError as exc:
-            sys.stderr.write(f"relai: {exc}\n")
+            sys.stderr.write(f"ludvart: {exc}\n")
             return None, None
 
     gateway = CopilotGateway(model)
     sys.stderr.write(
-        f"relai: starting the GitHub Copilot gateway (model {model!r})... "
+        f"ludvart: starting the GitHub Copilot gateway (model {model!r})... "
     )
     sys.stderr.flush()
     try:
         gateway.start()
     except GatewayError as exc:
         sys.stderr.write("FAILED\n")
-        sys.stderr.write(f"relai: {exc}\n")
+        sys.stderr.write(f"ludvart: {exc}\n")
         return None, None
     sys.stderr.write("ok\n")
 
@@ -272,8 +272,8 @@ def _run_setup_wizard() -> bool:
         return False
 
     sys.stderr.write(
-        "\nrelai: no LLM provider is configured yet -- let's set one up.\n"
-        "Answers are saved to ~/.relai/llm.conf (press Ctrl-C to skip).\n\n"
+        "\nludvart: no LLM provider is configured yet -- let's set one up.\n"
+        "Answers are saved to ~/.ludvart/llm.conf (press Ctrl-C to skip).\n\n"
     )
     sys.stderr.flush()
 
@@ -330,11 +330,11 @@ def _run_setup_wizard() -> bool:
             if not model:
                 sys.stderr.write("A model name is required.\n")
     except (EOFError, KeyboardInterrupt):
-        sys.stderr.write("\nrelai: setup skipped.\n")
+        sys.stderr.write("\nludvart: setup skipped.\n")
         return False
 
     path = write_provider_conf(provider, url, key, model)
-    sys.stderr.write(f"relai: saved provider settings to {path}\n")
+    sys.stderr.write(f"ludvart: saved provider settings to {path}\n")
     return True
 
 
@@ -343,14 +343,14 @@ def _setup_copilot() -> bool:
 
     Walks the user through GitHub's OAuth device flow (paid Copilot subscription
     required), caches the credentials via LiteLLM, and stores the chosen model in
-    ``~/.relai/llm.conf``. The gateway itself is spawned later at startup.
+    ``~/.ludvart/llm.conf``. The gateway itself is spawned later at startup.
     Returns ``True`` on success, ``False`` if unavailable or aborted.
     """
     from .gateway import GatewayError, authenticate_copilot, litellm_available
 
     if not litellm_available():
         sys.stderr.write(
-            "relai: the LiteLLM gateway isn't installed, so the GitHub Copilot\n"
+            "ludvart: the LiteLLM gateway isn't installed, so the GitHub Copilot\n"
             "       option is unavailable. Re-run ./setup.sh, or:\n"
             "       uv pip install 'litellm[proxy]'\n"
         )
@@ -358,29 +358,29 @@ def _setup_copilot() -> bool:
 
     sys.stderr.write(
         "\nGitHub Copilot requires an active paid GitHub Copilot subscription.\n"
-        "You'll authorize relai through GitHub's device flow: a URL and one-time\n"
+        "You'll authorize ludvart through GitHub's device flow: a URL and one-time\n"
         "code appear below -- open the URL, enter the code, and approve access.\n"
         "Credentials are cached under ~/.config/litellm and reused afterwards.\n"
         "(This uses GitHub's own OAuth, not ~/.netrc.)\n\n"
     )
     sys.stderr.flush()
 
-    sys.stderr.write("relai: starting GitHub authentication...\n")
+    sys.stderr.write("ludvart: starting GitHub authentication...\n")
     sys.stderr.flush()
     try:
         authenticate_copilot()
     except GatewayError as exc:
-        sys.stderr.write(f"\nrelai: {exc}\n")
+        sys.stderr.write(f"\nludvart: {exc}\n")
         return False
 
     model = _choose_copilot_model()
     if not model:
-        sys.stderr.write("\nrelai: setup skipped.\n")
+        sys.stderr.write("\nludvart: setup skipped.\n")
         return False
 
     path = write_copilot_conf(model)
     sys.stderr.write(
-        f"relai: GitHub Copilot authorized; saved model {model!r} to {path}\n"
+        f"ludvart: GitHub Copilot authorized; saved model {model!r} to {path}\n"
     )
     return True
 

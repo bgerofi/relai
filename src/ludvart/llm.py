@@ -1,6 +1,6 @@
 """LLM provider clients.
 
-relai talks to one of three providers, selected from a triplet of variables per
+ludvart talks to one of three providers, selected from a triplet of variables per
 provider:
 
     OpenAI:     OPENAI_API_URL     OPENAI_API_KEY     OPENAI_MODEL
@@ -9,7 +9,7 @@ provider:
     Custom:     CUSTOM_API_URL     CUSTOM_API_KEY     CUSTOM_MODEL
 
 These variables are read from the process environment and, as a fallback, from a
-``~/.relai/llm.conf`` file (simple ``KEY=VALUE`` lines). Environment variables
+``~/.ludvart/llm.conf`` file (simple ``KEY=VALUE`` lines). Environment variables
 take precedence over the file, so the file provides defaults that can still be
 overridden per-invocation.
 
@@ -22,10 +22,10 @@ A provider is considered "configured" only when all three of its variables are
 set; if several are configured, one is chosen by a fixed precedence
 (custom > google > anthropic > openai).
 
-Two optional settings tune request behaviour (env or ``~/.relai/llm.conf``):
-``RELAI_LLM_TIMEOUT`` (seconds per request, default 30) and
-``RELAI_LLM_MAX_RETRIES`` (retries on timeout / dropped connection / rate limit /
-5xx, default 2). relai owns the retry loop so it can report each retry in the UI.
+Two optional settings tune request behaviour (env or ``~/.ludvart/llm.conf``):
+``LUDVART_LLM_TIMEOUT`` (seconds per request, default 30) and
+``LUDVART_LLM_MAX_RETRIES`` (retries on timeout / dropped connection / rate limit /
+5xx, default 2). ludvart owns the retry loop so it can report each retry in the UI.
 """
 
 from __future__ import annotations
@@ -405,11 +405,11 @@ _ENV_PREFIX = {
 #: Location of the optional config file, read as a fallback for the provider
 #: variables. Real environment variables always take precedence over it.
 def _conf_path() -> str:
-    return os.path.join(os.path.expanduser("~"), ".relai", "llm.conf")
+    return os.path.join(os.path.expanduser("~"), ".ludvart", "llm.conf")
 
 
 def _load_conf(path: str | None = None) -> dict[str, str]:
-    """Parse ``~/.relai/llm.conf`` into a ``{KEY: VALUE}`` dict.
+    """Parse ``~/.ludvart/llm.conf`` into a ``{KEY: VALUE}`` dict.
 
     The format is simple ``KEY=VALUE`` lines. Blank lines and lines starting
     with ``#`` are ignored, a leading ``export`` is allowed, and matching single
@@ -450,7 +450,7 @@ def _getvar(conf: dict[str, str], name: str) -> str | None:
 
 
 def conf_path() -> str:
-    """Public path of the LLM config file (``~/.relai/llm.conf``)."""
+    """Public path of the LLM config file (``~/.ludvart/llm.conf``)."""
     return _conf_path()
 
 
@@ -461,13 +461,13 @@ def write_provider_conf(
     model: str,
     path: str | None = None,
 ) -> str:
-    """Persist a provider's settings to ``~/.relai/llm.conf`` and return the path.
+    """Persist a provider's settings to ``~/.ludvart/llm.conf`` and return the path.
 
-    Writes the three variables relai reads elsewhere --
+    Writes the three variables ludvart reads elsewhere --
     ``{PREFIX}_API_URL`` / ``{PREFIX}_API_KEY`` / ``{PREFIX}_MODEL`` -- updating
     any existing assignment of those keys in place and appending the rest,
     while preserving every other line (comments, other providers, tuning vars).
-    The file holds an API key, so it is created (with ``~/.relai``) using
+    The file holds an API key, so it is created (with ``~/.ludvart``) using
     owner-only ``0600`` permissions.
     """
     if provider not in _ENV_PREFIX:
@@ -484,7 +484,7 @@ def write_provider_conf(
 
 
 def write_copilot_conf(model: str, path: str | None = None) -> str:
-    """Persist the GitHub Copilot gateway model to ``~/.relai/llm.conf``.
+    """Persist the GitHub Copilot gateway model to ``~/.ludvart/llm.conf``.
 
     Stores just ``COPILOT_MODEL``; the endpoint URL and key are supplied at
     runtime by the locally spawned LiteLLM gateway, so they are not written.
@@ -493,11 +493,11 @@ def write_copilot_conf(model: str, path: str | None = None) -> str:
 
 
 def _write_conf_vars(updates: dict[str, str], path: str | None) -> str:
-    """Update ``KEY=VALUE`` assignments in ``~/.relai/llm.conf``, return the path.
+    """Update ``KEY=VALUE`` assignments in ``~/.ludvart/llm.conf``, return the path.
 
     Existing assignments of the given keys are replaced in place; any that are
     missing are appended. Every other line is preserved. The file may hold an
-    API key, so it is created (with ``~/.relai``) using ``0600`` permissions.
+    API key, so it is created (with ``~/.ludvart``) using ``0600`` permissions.
     """
     if path is None:
         path = _conf_path()
@@ -546,7 +546,7 @@ def _write_conf_vars(updates: dict[str, str], path: str | None) -> str:
 def copilot_model() -> str | None:
     """The GitHub Copilot model to route through the LiteLLM gateway, if set.
 
-    Read from ``COPILOT_MODEL`` in the environment or ``~/.relai/llm.conf``.
+    Read from ``COPILOT_MODEL`` in the environment or ``~/.ludvart/llm.conf``.
     """
     return _getvar(_load_conf(), "COPILOT_MODEL")
 
@@ -578,7 +578,7 @@ def _read_provider(name: str, conf: dict[str, str]) -> ProviderConfig | None:
     """Return a ProviderConfig if all three variables for ``name`` are set.
 
     Each variable is taken from the environment, falling back to ``conf`` (the
-    parsed ``~/.relai/llm.conf``); the environment always wins.
+    parsed ``~/.ludvart/llm.conf``); the environment always wins.
     """
     prefix = _ENV_PREFIX[name]
     url = _getvar(conf, f"{prefix}_API_URL")
@@ -601,7 +601,7 @@ def _read_provider(name: str, conf: dict[str, str]) -> ProviderConfig | None:
 
 
 def resolve_config() -> ProviderConfig | None:
-    """Select a provider from the environment / ``~/.relai/llm.conf``.
+    """Select a provider from the environment / ``~/.ludvart/llm.conf``.
 
     Returns ``None`` if no provider is fully configured.
     """
@@ -621,7 +621,7 @@ def resolve_config() -> ProviderConfig | None:
 # the *_CONTEXT_WINDOW env var nor the provider API supplies one. Matched as a
 # case-insensitive substring of the model id, most specific entries first. These
 # are only the defaults: on first run they are written to
-# ``~/.relai/context_windows.json`` (see :func:`ensure_context_windows_file`),
+# ``~/.ludvart/context_windows.json`` (see :func:`ensure_context_windows_file`),
 # and from then on that file is the source of truth so users can edit it.
 _DEFAULT_CONTEXT_WINDOWS: tuple[tuple[str, int], ...] = (
     # Anthropic (normally auto-detected via max_input_tokens, but many gateway /
@@ -653,7 +653,7 @@ _DEFAULT_CONTEXT_WINDOWS: tuple[tuple[str, int], ...] = (
 
 #: Explanatory note written into the JSON file so hand-editors know the rules.
 _CONTEXT_WINDOWS_DOC = (
-    "relai model context-window fallbacks, in tokens. Each key is matched as a "
+    "ludvart model context-window fallbacks, in tokens. Each key is matched as a "
     "case-insensitive SUBSTRING of the model id and the FIRST match wins, so "
     "keep the most specific model ids first. These are used only when neither a "
     "*_CONTEXT_WINDOW override nor the provider API reports a window. Edit "
@@ -664,13 +664,13 @@ _CONTEXT_WINDOWS_DOC = (
 def _context_windows_path() -> str:
     """Path of the editable context-window table (JSON).
 
-    Honors ``RELAI_CONTEXT_WINDOWS`` (used by tests and power users), otherwise
-    ``~/.relai/context_windows.json``.
+    Honors ``LUDVART_CONTEXT_WINDOWS`` (used by tests and power users), otherwise
+    ``~/.ludvart/context_windows.json``.
     """
-    override = os.environ.get("RELAI_CONTEXT_WINDOWS")
+    override = os.environ.get("LUDVART_CONTEXT_WINDOWS")
     if override:
         return override
-    return os.path.join(os.path.expanduser("~"), ".relai", "context_windows.json")
+    return os.path.join(os.path.expanduser("~"), ".ludvart", "context_windows.json")
 
 
 def context_windows_path() -> str:
@@ -705,7 +705,7 @@ def ensure_context_windows_file(path: str | None = None) -> str:
 def _load_context_windows(path: str | None = None) -> list[tuple[str, int]]:
     """Return the ordered (needle, window) table, from the file if present.
 
-    Reads ``~/.relai/context_windows.json`` when it exists so user edits take
+    Reads ``~/.ludvart/context_windows.json`` when it exists so user edits take
     effect immediately; otherwise falls back to the built-in defaults. Any
     malformed file or entry is skipped rather than raised (this runs on the
     request path and must never break a working provider).
@@ -766,7 +766,7 @@ class LLMClient:
         self.timeout = timeout
         self.max_retries = max(0, int(max_retries))
         # Optional progress hook, called with a short human-readable note before
-        # each retry so the UI can report what relai is doing while it waits.
+        # each retry so the UI can report what ludvart is doing while it waits.
         self.on_retry: Callable[[str], None] | None = None
         # Usage from the most recent request (set by complete/converse).
         self._last_usage: Usage | None = None
@@ -976,7 +976,7 @@ class OpenAIClient(LLMClient):
         base_url = config.api_url
         if base_url.endswith("/chat/completions"):
             base_url = base_url[: -len("/chat/completions")]
-        # relai owns retries (see LLMClient._request) so it can report them; tell
+        # ludvart owns retries (see LLMClient._request) so it can report them; tell
         # the SDK not to retry on its own.
         self._client = OpenAI(
             api_key=config.api_key, base_url=base_url, timeout=timeout, max_retries=0
@@ -1187,7 +1187,7 @@ class AnthropicClient(LLMClient):
             if base_url.endswith(suffix):
                 base_url = base_url[: -len(suffix)]
                 break
-        # relai owns retries (see LLMClient._request) so it can report them; tell
+        # ludvart owns retries (see LLMClient._request) so it can report them; tell
         # the SDK not to retry on its own.
         self._client = Anthropic(
             api_key=config.api_key, base_url=base_url, timeout=timeout, max_retries=0
@@ -1418,7 +1418,7 @@ class GoogleClient(LLMClient):
         config_kwargs: dict = {"max_output_tokens": max_tokens}
         if system_parts:
             config_kwargs["system_instruction"] = "\n\n".join(system_parts)
-        # Ask Gemini to return its thought summaries so relai can show the
+        # Ask Gemini to return its thought summaries so ludvart can show the
         # model's reasoning live (as the transient "Thinking" narration). Only
         # 2.5+ / 3.x models support this; enabling it on older ones errors.
         if _gemini_supports_thinking(self.config.model):
@@ -1576,13 +1576,13 @@ def _client_for(
 
 
 def _resolve_settings(conf: dict[str, str]) -> tuple[float, int]:
-    """Read the request timeout and retry count from env / ``~/.relai/llm.conf``.
+    """Read the request timeout and retry count from env / ``~/.ludvart/llm.conf``.
 
-    ``RELAI_LLM_TIMEOUT`` is in seconds, ``RELAI_LLM_MAX_RETRIES`` a count; each
+    ``LUDVART_LLM_TIMEOUT`` is in seconds, ``LUDVART_LLM_MAX_RETRIES`` a count; each
     falls back to its module default when unset or unparseable.
     """
     timeout = DEFAULT_TIMEOUT
-    raw_timeout = _getvar(conf, "RELAI_LLM_TIMEOUT")
+    raw_timeout = _getvar(conf, "LUDVART_LLM_TIMEOUT")
     if raw_timeout:
         try:
             parsed = float(raw_timeout)
@@ -1592,7 +1592,7 @@ def _resolve_settings(conf: dict[str, str]) -> tuple[float, int]:
             pass
 
     max_retries = DEFAULT_MAX_RETRIES
-    raw_retries = _getvar(conf, "RELAI_LLM_MAX_RETRIES")
+    raw_retries = _getvar(conf, "LUDVART_LLM_MAX_RETRIES")
     if raw_retries:
         try:
             parsed_int = int(raw_retries)
@@ -1607,11 +1607,11 @@ def _resolve_settings(conf: dict[str, str]) -> tuple[float, int]:
 def create_client(
     timeout: float | None = None, max_retries: int | None = None
 ) -> LLMClient:
-    """Resolve config from the environment / ``~/.relai/llm.conf`` and build the
+    """Resolve config from the environment / ``~/.ludvart/llm.conf`` and build the
     matching client.
 
     The request ``timeout`` (seconds) and ``max_retries`` come from
-    ``RELAI_LLM_TIMEOUT`` / ``RELAI_LLM_MAX_RETRIES`` (env or ``~/.relai/llm.conf``)
+    ``LUDVART_LLM_TIMEOUT`` / ``LUDVART_LLM_MAX_RETRIES`` (env or ``~/.ludvart/llm.conf``)
     unless passed explicitly.
 
     Raises :class:`LLMNotConfigured` if no provider is fully configured.
@@ -1621,7 +1621,7 @@ def create_client(
         raise LLMNotConfigured(
             "no LLM provider configured; set the API_URL, API_KEY and MODEL "
             "variables for OPENAI, ANTHROPIC, GOOGLE, or CUSTOM (in the "
-            "environment or in ~/.relai/llm.conf)"
+            "environment or in ~/.ludvart/llm.conf)"
         )
     conf_timeout, conf_retries = _resolve_settings(_load_conf())
     if timeout is None:
@@ -1639,7 +1639,7 @@ def build_client(
     """Build a client for an already-resolved ``config`` (e.g. the local gateway).
 
     Request ``timeout`` / ``max_retries`` default to the values from
-    ``RELAI_LLM_TIMEOUT`` / ``RELAI_LLM_MAX_RETRIES`` (env or ``~/.relai/llm.conf``).
+    ``LUDVART_LLM_TIMEOUT`` / ``LUDVART_LLM_MAX_RETRIES`` (env or ``~/.ludvart/llm.conf``).
     """
     conf_timeout, conf_retries = _resolve_settings(_load_conf())
     if timeout is None:

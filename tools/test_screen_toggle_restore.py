@@ -1,7 +1,7 @@
-"""RelaiScreen shrink->grow restores the exact prior viewport (incl. trailing
+"""LudvartScreen shrink->grow restores the exact prior viewport (incl. trailing
 blank lines) and stays correct when content changes while shrunk."""
 
-from relai.screen import RelaiScreen
+from ludvart.screen import LudvartScreen
 
 COLS, ROWS, PANEL = 80, 24, 10
 APP = ROWS - PANEL
@@ -24,7 +24,7 @@ def check(label, cond):
 
 
 def scenario_full_screen():
-    s = RelaiScreen(COLS, ROWS)
+    s = LudvartScreen(COLS, ROWS)
     feed_lines(s, [f"line_{i:02d}" for i in range(30)])  # scrolls
     before, cur_before = disp(s), (s.cursor.y, s.cursor.x)
     s.resize(APP, COLS)      # open panel
@@ -35,7 +35,7 @@ def scenario_full_screen():
 
 
 def scenario_partial_with_blanks():
-    s = RelaiScreen(COLS, ROWS)
+    s = LudvartScreen(COLS, ROWS)
     import pyte
     stream = pyte.ByteStream(s)
     stream.feed(b"A0\r\nA1\r\nA2\r\nA3\r\nA4")  # 5 rows, cursor row 4, blanks below
@@ -48,14 +48,14 @@ def scenario_partial_with_blanks():
 
 
 def scenario_changes_while_open():
-    # relai path: full screen -> shrink -> new output arrives -> grow.
-    s = RelaiScreen(COLS, ROWS)
+    # ludvart path: full screen -> shrink -> new output arrives -> grow.
+    s = LudvartScreen(COLS, ROWS)
     feed_lines(s, [f"orig_{i:02d}" for i in range(24)])
     s.resize(APP, COLS)                        # open panel
     feed_lines(s, [f"new_{i:02d}" for i in range(5)])  # output while shrunk
     s.resize(ROWS, COLS)                       # close panel
     # reference: same total output on an always-full screen.
-    ref = RelaiScreen(COLS, ROWS)
+    ref = LudvartScreen(COLS, ROWS)
     feed_lines(ref, [f"orig_{i:02d}" for i in range(24)] +
                [f"new_{i:02d}" for i in range(5)])
     return check("changed-while-open: matches always-full-size screen",

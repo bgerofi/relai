@@ -1,4 +1,4 @@
-# RelAI
+# Ludvart
 
 <!--
 Are you tired of talking to your favorite LLM in a dedicated chat window and
@@ -9,25 +9,25 @@ everyday CLI tasks? Then you're in the right place.
 -->
 
 
-**relai** is an AI agent that sits transparently on the character stream between
+**ludvart** is an AI agent that sits transparently on the character stream between
 you and any terminal-based program you're running, wherever you happen to
 be running it. It sees exactly what you see, and it's ready to help with whatever
 you need, whenever you need it.
 
-**relai** operates at the pseudo-terminal (PTY) layer rather than inside any
+**ludvart** operates at the pseudo-terminal (PTY) layer rather than inside any
 particular application, thus it integrates **seamlessly with any terminal and any
 program**: arbitrary shells, full-screen TUI apps (`htop`, `vim`, `claude`), and
 REPLs all work unchanged. There is nothing to configure per-app; if it runs in a
-terminal, relai can drive it.
+terminal, ludvart can drive it.
 
-relai is **host transparent**, it processes the PTY byte stream and it
+ludvart is **host transparent**, it processes the PTY byte stream and it
 travels with you across `ssh` hops, nested `tmux`/`screen` sessions,
 even interactive jobs on a supercomputer.
 It keeps working on the far side without needing any agent or API key installed
 on the remote host, or the right proxy settings configured.
 Your session, wherever it goes, carries the agent along.
 
-You are in control by default, **relai** does not disturb you, but once you summon
+You are in control by default, **ludvart** does not disturb you, but once you summon
 the agent, it can:
 
 - **Run commands** on your behalf (and read back their output).
@@ -38,20 +38,20 @@ the agent, it can:
 - Through enhanced **[helpers](#assistant-helpers)** it can also acomplish more
   complex tasks, such as coding or debugging, issue resolution or triaging, etc.
 
-## What RelAI is not?
+## What Ludvart is not?
 
-- RelAI is **not an MCP service or a plugin** for extending other harnesses. 
+- Ludvart is **not an MCP service or a plugin** for extending other harnesses. 
   It does not exist to hand tools or context to a separate AI harness. It *is* the
   agent, and it drives any harness by itself, at the PTY layer, sending real
   keystrokes and reading the real screen. There is no host application it needs
   to be embedded in and nothing to register on the far side.
-- RelAI is **not a terminal emulator with AI bolted on**. It does not implement a
+- Ludvart is **not a terminal emulator with AI bolted on**. It does not implement a
   terminal, swap you onto a different shell, or ask you to adopt a new one. It
   launches your own `$SHELL` (or the command you give it) and runs *inside*
   whatever terminal you already use (xterm, iTerm, Alacritty, ghostty, Windows Terminal,
   a `tmux`/`screen` pane, etc.), relaying the byte stream transparently.
   Your terminal, keybindings, and workflow stay exactly as they were.
-- RelAI is **not a shell modification**. It does not patch, wrap, or replace your
+- Ludvart is **not a shell modification**. It does not patch, wrap, or replace your
   shell, and it is not tied to any particular one. It works with any shell and any
   CLI tool: a database prompt, a code editor, a debugger, a REPL,
   or whatever else you launch.
@@ -59,26 +59,26 @@ the agent, it can:
 
 ## Getting Started
 
-To set up the relai environment, run:
+To set up the ludvart environment, run:
 
 ```bash
 ./setup.sh
 source .venv/bin/activate
 ```
 
-`setup.sh` creates a local `.venv`, installs relai, and also installs the
+`setup.sh` creates a local `.venv`, installs ludvart, and also installs the
 optional **LiteLLM gateway** (`litellm[proxy]`) that enables the **GitHub
-Copilot** backend. To start relai, type:
+Copilot** backend. To start ludvart, type:
 
 ```bash
-relai
+ludvart
 ```
 
 ## LLM configuration
 
-The first time you run `relai` without a configured LLM provider, it walks you
+The first time you run `ludvart` without a configured LLM provider, it walks you
 through a short **interactive setup** that saves your choice to
-`~/.relai/llm.conf`:
+`~/.ludvart/llm.conf`:
 
 ```
 Select the API endpoint type:
@@ -121,7 +121,7 @@ Press the prefix key (default **Ctrl-G**), then a command letter:
 - `Ctrl-G` `o` — send a literal Ctrl-O byte to the program underneath
 - `Ctrl-G` `Ctrl-G` — send a literal prefix byte to the program underneath
 
-Change the prefix with `--prefix` (e.g. `relai --prefix ctrl-o`).
+Change the prefix with `--prefix` (e.g. `ludvart --prefix ctrl-o`).
 
 ## Assistant tools
 
@@ -139,7 +139,7 @@ input, which makes the tool useful in two ways:
 - **Send keystrokes to interactive programs** — control characters and TUI
   navigation for editors, pagers, and REPLs (`vim`, `less`, a Python shell, etc.).
 
-Because relai operates at the PTY layer, injected input flows through the same
+Because ludvart operates at the PTY layer, injected input flows through the same
 byte stream as your own keystrokes, so it works with plain shells, full-screen
 ncurses apps, and nested remote sessions alike.
 
@@ -163,7 +163,7 @@ can go back and inspect earlier output rather than only the visible rows.
 | `offset` | Where to start; a negative value counts lines above the current position. |
 | `length` | How many lines to return.                                          |
 
-Because the injected-input result and the screen history both come from relai's
+Because the injected-input result and the screen history both come from ludvart's
 own `pyte` model of the terminal, the agent always sees exactly what you see —
 across plain shells, full-screen apps, and remote sessions alike.
 
@@ -175,15 +175,15 @@ agent touches your machine. Everything the agent does ultimately flows through
 them. **Helpers** are a complementary mechanism layered *on top of* those
 tools.
 
-Because relai works purely at the PTY layer, the harness has no direct
+Because ludvart works purely at the PTY layer, the harness has no direct
 filesystem or exec access to the (possibly remote) box it is driving — it only
 sees the terminal. To work reliably at a higher level, the agent uses a small,
-dependency-free helper program, `relai_helper`, under `~/.relai/bin/` on that
-machine. The canonical helper ships *with* relai as a version-pinned,
+dependency-free helper program, `ludvart_helper`, under `~/.ludvart/bin/` on that
+machine. The canonical helper ships *with* ludvart as a version-pinned,
 checksummed copy.
 
 The agent does not call helpers directly the way it calls a tool; it *runs*
-them by typing a shell command through `inject_input`. `relai_helper` exposes
+them by typing a shell command through `inject_input`. `ludvart_helper` exposes
 subcommands for the file operations that are awkward to do safely over a raw
 terminal — `read`, `write`, `append`, `replace`, `replace-range`, `search`,
 `run`, and `info`. Every content payload is passed as base64 and every result is
@@ -192,7 +192,7 @@ and escape corruption, and success is read from a reliable status rather than
 guessed from screen text.
 
 You can install or repair it at any time with the `/init_helpers` panel command.
-This is deterministic and does *not* involve the model: relai injects a short,
+This is deterministic and does *not* involve the model: ludvart injects a short,
 self-contained shell command that compares the on-disk copy against the bundled
 version by checksum and rewrites it only if it is missing, outdated, or
 modified.
@@ -201,8 +201,8 @@ modified.
 
 | | Tools | Helpers |
 |---|-------|---------|
-| **What** | Built-in agent primitives | A version-pinned script bundled with relai |
-| **Where they run** | Inside the relai process (Python) | On the target machine, under `~/.relai/bin/` |
+| **What** | Built-in agent primitives | A version-pinned script bundled with ludvart |
+| **Where they run** | Inside the ludvart process (Python) | On the target machine, under `~/.ludvart/bin/` |
 | **How invoked** | Called directly by the model | Run via `inject_input` (typed as shell commands) |
 | **Availability** | Always present | Optional; installed/repaired via `/init_helpers` |
 | **Lifetime** | Live for the process | Persist across sessions |
@@ -216,7 +216,7 @@ modified.
 If you'd rather not deal with the interactive
 step — or you want to override what it saved — you can configure a provider
 directly with a triplet of variables (URL, key, model), either as environment
-variables or in `~/.relai/llm.conf`. Set the three variables for one provider:
+variables or in `~/.ludvart/llm.conf`. Set the three variables for one provider:
 
 | Provider  | URL                 | Key                 | Model             |
 |-----------|---------------------|---------------------|-------------------|
@@ -232,19 +232,19 @@ overrides the wizard's saved settings for that invocation.
 The **custom** provider speaks the OpenAI-compatible API, so it works with local
 servers (LM Studio, llama.cpp, vLLM, Ollama's OpenAI shim) and gateways. Google
 uses the Gemini (`google-genai`) SDK. For **GitHub Copilot** you only set
-`COPILOT_MODEL` — the URL and key point at the local LiteLLM gateway, which relai
+`COPILOT_MODEL` — the URL and key point at the local LiteLLM gateway, which ludvart
 starts and configures for you (see [below](#github-copilot-via-litellm)).
 
-At startup relai makes a minimal request to verify the provider is reachable. If
-no provider is configured (and the wizard is skipped or non-interactive), relai
+At startup ludvart makes a minimal request to verify the provider is reachable. If
+no provider is configured (and the wizard is skipped or non-interactive), ludvart
 runs as a plain relay.
 
 
 ### More on GitHub Copilot (via LiteLLM)
 
-relai can use **GitHub Copilot** as an OpenAI-compatible backend by spawning a
+ludvart can use **GitHub Copilot** as an OpenAI-compatible backend by spawning a
 local [LiteLLM](https://github.com/BerriAI/litellm) proxy that fronts LiteLLM's
-`github_copilot/` provider. relai then talks to that proxy with its normal
+`github_copilot/` provider. ludvart then talks to that proxy with its normal
 OpenAI-compatible client — no endpoint URL or API key to manage.
 
 Requirements and behavior:
@@ -252,7 +252,7 @@ Requirements and behavior:
 - An **active paid GitHub Copilot subscription**.
 - The gateway (`litellm[proxy]`) must be installed — `setup.sh` does this, or
   run `uv pip install 'litellm[proxy]'`.
-- Authorization uses **GitHub's OAuth device flow**: relai prints a URL and a
+- Authorization uses **GitHub's OAuth device flow**: ludvart prints a URL and a
   one-time code; you open the URL, enter the code, and approve access. The
   credentials are cached under `~/.config/litellm/github_copilot` and reused on
   later runs, so the gateway starts non-interactively afterwards. (This uses
@@ -263,31 +263,31 @@ device flow and lists the models your account can use (Copilot uses its own mode
 ids, e.g. `gpt-4o`, `claude-opus-4.8`). Only the chosen model is stored:
 
 ```ini
-# ~/.relai/llm.conf
+# ~/.ludvart/llm.conf
 COPILOT_MODEL=gpt-5.3-codex
 ```
 
 At startup, when no direct provider is configured but `COPILOT_MODEL` is set,
-relai authorizes (if needed), spawns the local LiteLLM gateway on loopback, and
-points its OpenAI-compatible client at it. The gateway is shut down when relai
+ludvart authorizes (if needed), spawns the local LiteLLM gateway on loopback, and
+points its OpenAI-compatible client at it. The gateway is shut down when ludvart
 exits.
 
 ### Timeouts and retries
 
-Each request waits up to **`RELAI_LLM_TIMEOUT`** seconds (default `30`). On a
+Each request waits up to **`LUDVART_LLM_TIMEOUT`** seconds (default `30`). On a
 transient failure — a timeout, a dropped connection, a rate limit, or a `5xx`
-response — relai retries up to **`RELAI_LLM_MAX_RETRIES`** times (default `2`,
+response — ludvart retries up to **`LUDVART_LLM_MAX_RETRIES`** times (default `2`,
 with exponential backoff). Both settings are read from the environment
-or `~/.relai/llm.conf`.
+or `~/.ludvart/llm.conf`.
 
 ### Context window
 
-relai tracks how much of the model's context window a conversation uses (shown
+ludvart tracks how much of the model's context window a conversation uses (shown
 as a `[NN%]` badge in the panel, and used to trigger automatic summarization).
 It learns the window size from the provider's API when possible; otherwise it
 falls back to a small table of known models.
 
-On first run that table is written to **`~/.relai/context_windows.json`** — a
+On first run that table is written to **`~/.ludvart/context_windows.json`** — a
 self-documented JSON file you can edit. Each key is matched as a
 case-insensitive substring of the model id and the first match wins, so keep the
 most specific ids first:
@@ -301,7 +301,7 @@ most specific ids first:
 }
 ```
 
-relai re-reads the file whenever it changes, so edits take effect on the next
+ludvart re-reads the file whenever it changes, so edits take effect on the next
 request. Delete the file to regenerate the defaults. For a one-off override you
 can instead set `<PROVIDER>_CONTEXT_WINDOW` (e.g. `CUSTOM_CONTEXT_WINDOW`), which
 always wins.
@@ -312,7 +312,7 @@ always wins.
 ## Related projects
 
 Other projects put an AI agent near the terminal, but they fall into two camps
-that are each distinct from RelAI.
+that are each distinct from Ludvart.
 
 **Headless drivers** — the *agent* spawns and owns a session and drives it
 programmatically; the human is out of the loop and reviews the result:
@@ -343,12 +343,12 @@ session:
 
 Further out: [Warp](https://www.warp.dev/) and Microsoft's
 [Intelligent Terminal](https://devblogs.microsoft.com/commandline/announcing-intelligent-terminal-version-0-1/)
-are full terminal-emulator replacements — the thing relai deliberately is *not*
-(see [What RelAI is not?](#what-relai-is-not)).
+are full terminal-emulator replacements — the thing ludvart deliberately is *not*
+(see [What Ludvart is not?](#what-ludvart-is-not)).
 
-### How RelAI compares
+### How Ludvart compares
 
-| Dimension | RelAI | Butterfish | TmuxAI | AIShell | Headless drivers |
+| Dimension | Ludvart | Butterfish | TmuxAI | AIShell | Headless drivers |
 |---|:---:|:---:|:---:|:---:|:---:|
 | In-band, human-driven | ✅ | ✅ | ✅ | ✅ | ✗ |
 | Full terminal- & program-indepence (i.e., nothing to modify) | ✅ | ✗ (its shell) | ✗ (tmux) | ✗ (its shell) | ✗ (program reachable only through their API/CLI) |

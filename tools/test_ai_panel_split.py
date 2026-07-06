@@ -1,7 +1,7 @@
 """Drive the bottom AI panel through a PTY, emulating a real terminal via pyte.
 
 The compositor emits absolute-positioned row diffs, so the harness must render
-them like a terminal. We feed all of relai's output into a pyte screen and print
+them like a terminal. We feed all of ludvart's output into a pyte screen and print
 snapshots at each step.
 """
 
@@ -40,7 +40,7 @@ def main():
     if pid == 0:
         os.environ["PS1"] = "$ "
         os.environ["TERM"] = "xterm"
-        os.execvp("relai", ["relai", "--", "bash", "--norc", "-i"])
+        os.execvp("ludvart", ["ludvart", "--", "bash", "--norc", "-i"])
     fcntl.ioctl(m, termios.TIOCSWINSZ, struct.pack("HHHH", ROWS, COLS, 0, 0))
     screen = pyte.Screen(COLS, ROWS)
     stream = pyte.ByteStream(screen)

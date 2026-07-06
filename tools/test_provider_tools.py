@@ -17,7 +17,7 @@ from types import SimpleNamespace
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1] / "src"))
 
-from relai.llm import (  # noqa: E402
+from ludvart.llm import (  # noqa: E402
     GoogleClient,
     OpenAIClient,
     ProviderConfig,
@@ -350,7 +350,7 @@ def test_google_stream_text_deltas():
 
 
 def test_google_thinking_gate_and_thought_streaming():
-    from relai.llm import _gemini_supports_thinking
+    from ludvart.llm import _gemini_supports_thinking
 
     # Thinking (include_thoughts) is only enabled for 2.5+/3.x models.
     assert _gemini_supports_thinking("gemini-2.5-flash")

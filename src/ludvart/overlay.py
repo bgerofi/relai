@@ -1,6 +1,6 @@
 """Full-screen overlays drawn on the alternate screen buffer.
 
-Overlays let relai temporarily take over the terminal (to show scrollback, an
+Overlays let ludvart temporarily take over the terminal (to show scrollback, an
 AI panel, etc.) without disturbing the child program's screen. We switch to the
 alternate screen buffer, draw, and on exit switch back -- so whatever the child
 had on screen is restored exactly.
@@ -63,7 +63,7 @@ class ScrollbackViewer:
     def show(
         self,
         lines: list[str],
-        title: str = "relai scrollback",
+        title: str = "ludvart scrollback",
         start_at_top: bool = False,
     ) -> None:
         """Open the pager on ``lines`` and block until the user closes it."""
@@ -173,8 +173,8 @@ class AIPanel:
             self._render_status("Thinking...")
             try:
                 reply = ask(question)
-            except Exception as exc:  # surfaced to the user, not crashing relai
-                reply = f"[relai] LLM request failed:\n{exc}"
+            except Exception as exc:  # surfaced to the user, not crashing ludvart
+                reply = f"[ludvart] LLM request failed:\n{exc}"
             self._show_reply(question, reply)
         finally:
             _write_all(self.out_fd, _SHOW_CURSOR + _LEAVE_ALT)
@@ -183,7 +183,7 @@ class AIPanel:
 
     def _read_question(self, footer: str) -> str:
         """Read a single line of input with basic editing. Esc cancels."""
-        prompt = "Ask relai: "
+        prompt = "Ask ludvart: "
         buf = bytearray()
         self._render_prompt(prompt, buf, footer)
         while True:
@@ -236,7 +236,7 @@ class AIPanel:
         for para in reply.splitlines() or [""]:
             lines.extend(_wrap(para, self.cols))
         viewer = ScrollbackViewer(self.out_fd, self.in_fd, self.rows, self.cols)
-        viewer.show(lines, title="relai answer", start_at_top=True)
+        viewer.show(lines, title="ludvart answer", start_at_top=True)
 
 
 # Single-byte keys accepted by the viewer.

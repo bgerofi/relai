@@ -1,4 +1,4 @@
-"""Tests for external MCP server support (src/relai/mcp.py).
+"""Tests for external MCP server support (src/ludvart/mcp.py).
 
 These spin up a *real* stdio MCP server (a tiny FastMCP script in a temp file)
 and drive it through :class:`McpManager`, so discovery, tool namespacing and
@@ -7,7 +7,7 @@ second, deliberately broken server checks that a failing/unreachable server is
 reported without hanging or taking the others down.
 
 Run:
-    cd /local_home/bgerofi1/src/relai && source .venv/bin/activate \
+    cd /local_home/bgerofi1/src/ludvart && source .venv/bin/activate \
         && python tools/test_mcp.py
 """
 
@@ -18,7 +18,7 @@ import tempfile
 import textwrap
 from pathlib import Path
 
-from relai.mcp import (
+from ludvart.mcp import (
     McpManager,
     McpConfigError,
     _expand,
@@ -33,7 +33,7 @@ _SERVER_SRC = textwrap.dedent(
     """
     from mcp.server.fastmcp import FastMCP
 
-    mcp = FastMCP("relai-test")
+    mcp = FastMCP("ludvart-test")
 
     @mcp.tool()
     def echo(text: str) -> str:
@@ -94,9 +94,9 @@ def test_load_config_variants():
 
 
 def test_expand_and_public_name():
-    os.environ["RELAI_TEST_TOKEN"] = "secret123"
-    assert _expand("Bearer ${env:RELAI_TEST_TOKEN}") == "Bearer secret123"
-    assert _expand("${env:RELAI_DOES_NOT_EXIST}") == ""
+    os.environ["LUDVART_TEST_TOKEN"] = "secret123"
+    assert _expand("Bearer ${env:LUDVART_TEST_TOKEN}") == "Bearer secret123"
+    assert _expand("${env:LUDVART_DOES_NOT_EXIST}") == ""
 
     used: set[str] = set()
     n1 = _public_name("git.hub", "search repos", used)
@@ -176,7 +176,7 @@ def test_broken_server_reported():
         root,
         {
             "echo": {"command": sys.executable, "args": [str(server)]},
-            "broken": {"command": "relai_nonexistent_binary_xyz", "args": []},
+            "broken": {"command": "ludvart_nonexistent_binary_xyz", "args": []},
         },
     )
     # Short connect timeout so the broken server fails fast.

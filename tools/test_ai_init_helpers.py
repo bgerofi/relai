@@ -6,17 +6,17 @@ and reports the parsed result. Also asserts the old first-open
 auto-initialization has been removed.
 
 Run:
-    cd /local_home/bgerofi1/src/relai && source .venv/bin/activate \
+    cd /local_home/bgerofi1/src/ludvart && source .venv/bin/activate \
         && python tools/test_ai_init_helpers.py
 """
 
-from relai.relai import Relai
-from relai.panel import AiPanel
-from relai.helper_src import RELAI_HELPER_VERSION, helper_install_command
+from ludvart.ludvart import Ludvart
+from ludvart.panel import AiPanel
+from ludvart.helper_src import LUDVART_HELPER_VERSION, helper_install_command
 
 
-def make_relai(with_llm: bool = True):
-    r = Relai(["true"])
+def make_ludvart(with_llm: bool = True):
+    r = Ludvart(["true"])
     r.llm = object() if with_llm else None  # truthy stub; only presence matters
     r._panel = AiPanel(cols=80, height=8, provider="test")
     r._phys_rows, r._phys_cols = 24, 80
@@ -43,14 +43,14 @@ def submit(r, text: str) -> None:
 
 
 def test_init_helpers_is_deterministic():
-    r, actions, asks = make_relai(with_llm=True)
+    r, actions, asks = make_ludvart(with_llm=True)
     # Stub the injection so the "screen" contains a realistic install result.
     written: list = []
     r._write_all = lambda fd, data: written.append(data)
     r._current_prompt_prefix = lambda: "$ "
     r._wait_for_injection_to_settle = (
         lambda cmd, prefix: "$ ...\n"
-        f"RELAI_HELPER_INIT status=installed version={RELAI_HELPER_VERSION} "
+        f"LUDVART_HELPER_INIT status=installed version={LUDVART_HELPER_VERSION} "
         "ok=1 reason=missing\n$ "
     )
     submit(r, "/init_helpers")
@@ -63,19 +63,19 @@ def test_init_helpers_is_deterministic():
     # The parsed status is shown as a system line.
     msgs = [t for t in r._panel.messages]
     assert msgs[0][0] == "system" and msgs[0][1] == "> /init_helpers"
-    assert any("installed" in t and RELAI_HELPER_VERSION in t
+    assert any("installed" in t and LUDVART_HELPER_VERSION in t
                for k, t in msgs if k == "system"), msgs
     print("/init_helpers is deterministic (no LLM): OK")
 
 
 def test_init_helpers_works_without_llm():
     # No provider configured must NOT block a deterministic install.
-    r, actions, asks = make_relai(with_llm=False)
+    r, actions, asks = make_ludvart(with_llm=False)
     r._write_all = lambda fd, data: None
     r._current_prompt_prefix = lambda: "$ "
     r._wait_for_injection_to_settle = (
-        lambda cmd, prefix: f"RELAI_HELPER_INIT status=current "
-        f"version={RELAI_HELPER_VERSION} ok=1 reason=match"
+        lambda cmd, prefix: f"LUDVART_HELPER_INIT status=current "
+        f"version={LUDVART_HELPER_VERSION} ok=1 reason=match"
     )
     submit(r, "/init_helpers")
     assert asks == []
@@ -85,24 +85,24 @@ def test_init_helpers_works_without_llm():
 
 
 def test_parse_helper_init_cases():
-    p = Relai._parse_helper_init
-    v = RELAI_HELPER_VERSION
-    assert "installed" in p(f"RELAI_HELPER_INIT status=installed version={v} ok=1 reason=missing")
-    assert "up to date" in p(f"RELAI_HELPER_INIT status=current version={v} ok=1 reason=match")
-    assert "reinstalled" in p(f"RELAI_HELPER_INIT status=installed version={v} ok=1 reason=stale_or_modified")
-    assert "FAILED" in p(f"RELAI_HELPER_INIT status=installed version={v} ok=0 reason=stale_or_modified")
+    p = Ludvart._parse_helper_init
+    v = LUDVART_HELPER_VERSION
+    assert "installed" in p(f"LUDVART_HELPER_INIT status=installed version={v} ok=1 reason=missing")
+    assert "up to date" in p(f"LUDVART_HELPER_INIT status=current version={v} ok=1 reason=match")
+    assert "reinstalled" in p(f"LUDVART_HELPER_INIT status=installed version={v} ok=1 reason=stale_or_modified")
+    assert "FAILED" in p(f"LUDVART_HELPER_INIT status=installed version={v} ok=0 reason=stale_or_modified")
     assert "Could not confirm" in p("nothing relevant here")
     # Echo-safe: the command echo contains 'status=%s' but the real line wins.
     echoed = (
         'print("...status=%s version=%s ok=%s...")\n'
-        f"RELAI_HELPER_INIT status=installed version={v} ok=1 reason=missing"
+        f"LUDVART_HELPER_INIT status=installed version={v} ok=1 reason=missing"
     )
     assert "installed" in p(echoed)
     print("_parse_helper_init cases: OK")
 
 
 def test_autoinit_removed():
-    r, _, _ = make_relai()
+    r, _, _ = make_ludvart()
     # The first-open auto-initialization machinery must be gone.
     assert not hasattr(r, "_helpers_init_attempted"), "auto-init flag should be gone"
     assert not hasattr(r, "_maybe_init_helpers"), "_maybe_init_helpers should be gone"
@@ -111,7 +111,7 @@ def test_autoinit_removed():
 
 
 def test_tab_completion():
-    r, _, _ = make_relai()
+    r, _, _ = make_ludvart()
     for ch in "/init":
         r._panel_key(ch.encode())
     r._panel_key(b"\t")

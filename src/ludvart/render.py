@@ -1,8 +1,8 @@
 """Render a pyte screen to escape sequences, with a row-level frame differ.
 
-While the AI panel is open, relai stops passing child bytes through verbatim and
+While the AI panel is open, ludvart stops passing child bytes through verbatim and
 instead becomes a compositor: the child writes to the pyte model (its *virtual*
-screen), and relai renders that model onto the top region of the physical
+screen), and ludvart renders that model onto the top region of the physical
 screen, drawing the panel below it. This module turns model cells into bytes and
 diffs frames so only changed rows are repainted.
 """

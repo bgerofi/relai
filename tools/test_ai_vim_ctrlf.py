@@ -32,7 +32,7 @@ def show(screen, label):
 
 def main():
     # Build a long numbered file to make paging visible.
-    with open("/tmp/relai_vim_test.txt", "w") as f:
+    with open("/tmp/ludvart_vim_test.txt", "w") as f:
         for i in range(1, 201):
             f.write(f"line_{i:03d}\n")
 
@@ -40,7 +40,7 @@ def main():
     if pid == 0:
         os.environ["PS1"] = "$ "
         os.environ["TERM"] = "xterm"
-        os.execvp("relai", ["relai", "--", "bash", "--norc", "-i"])
+        os.execvp("ludvart", ["ludvart", "--", "bash", "--norc", "-i"])
     fcntl.ioctl(m, termios.TIOCSWINSZ, struct.pack("HHHH", ROWS, COLS, 0, 0))
     screen = pyte.Screen(COLS, ROWS)
     stream = pyte.ByteStream(screen)
@@ -50,7 +50,7 @@ def main():
         pump(m, stream, wait)
 
     pump(m, stream, 8)
-    send(b"vim -u NONE /tmp/relai_vim_test.txt\r", 3)
+    send(b"vim -u NONE /tmp/ludvart_vim_test.txt\r", 3)
     show(screen, "vim opened (top of file)")
     send(b"\x07", 0.3); send(b"a", 0.5)
     send(b"Page down one screen in vim (this is a read-only view, do NOT "

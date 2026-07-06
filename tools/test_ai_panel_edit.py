@@ -1,12 +1,12 @@
 """Unit tests for the panel line editor and bracketed-paste input handling.
 
 Run:
-    cd /local_home/bgerofi1/src/relai && source .venv/bin/activate \
+    cd /local_home/bgerofi1/src/ludvart && source .venv/bin/activate \
         && python tools/test_ai_panel_edit.py
 """
 
-from relai.lineedit import LineEditor
-from relai.panel import AiPanel
+from ludvart.lineedit import LineEditor
+from ludvart.panel import AiPanel
 
 
 def test_line_editor():
@@ -63,7 +63,7 @@ def test_line_editor():
 
 def test_input_view_scroll():
     panel = AiPanel(cols=20, height=8, provider="test")
-    # prompt "relai> " is 7 chars -> avail = 13
+    # prompt "ludvart> " is 7 chars -> avail = 13
     panel.editor.insert("abcdefghij")  # 10 chars, fits
     visible, col = panel._input_view()
     assert visible == "abcdefghij"

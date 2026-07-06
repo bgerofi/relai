@@ -2,7 +2,7 @@
 
 The panel owns only its own state (conversation transcript, the question being
 typed, scroll offset, height). It renders itself to a list of drawable row
-payloads; the compositor in :mod:`relai` places those on the physical screen
+payloads; the compositor in :mod:`ludvart` places those on the physical screen
 below the (resized) application region. The panel never touches the child's
 screen model.
 """
@@ -18,7 +18,7 @@ _REVERSE = b"\x1b[7m"
 _CYAN = b"\x1b[36m"
 _DIM = b"\x1b[2m"
 
-_PROMPT = "relai> "
+_PROMPT = "ludvart> "
 
 # Animated ellipsis frames: dots grow then shrink after the "thinking" text.
 _THINK_FRAMES = ("", ".", "..", "...", "..", ".")
@@ -67,7 +67,7 @@ class AiPanel:
         self.scroll = 0
 
     def add_reply(self, text: str) -> None:
-        self._messages.append(("relai", text))
+        self._messages.append(("ludvart", text))
         self.scroll = 0
 
     def add_info(self, text: str) -> None:
@@ -199,7 +199,7 @@ class AiPanel:
         return lines
 
     def _header(self, more_above: int) -> bytes:
-        label = f" relai · {self.provider} " if self.provider else " relai "
+        label = f" ludvart · {self.provider} " if self.provider else " ludvart "
         if self.thinking:
             label += f"· {self.activity} "
         hints = "^O/Esc:close  ^G Up/Dn/PgUp/Dn:resize  PgUp/Dn:scroll "

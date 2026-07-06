@@ -1,6 +1,6 @@
 """Inline AI test harness that emulates a real terminal (answers DSR ESC[6n).
 
-relai now asks the terminal for the true cursor position; a dumb pipe never
+ludvart now asks the terminal for the true cursor position; a dumb pipe never
 answers, so this harness feeds all child output through pyte and replies to
 ESC[6n with the pyte cursor position, exactly like a real terminal.
 """
@@ -36,7 +36,7 @@ def scenario(ps1, label, partial=b""):
     if pid == 0:
         os.environ["PS1"] = ps1
         os.environ["TERM"] = "xterm"
-        os.execvp("relai", ["relai", "--", "bash", "--norc", "-i"])
+        os.execvp("ludvart", ["ludvart", "--", "bash", "--norc", "-i"])
     fcntl.ioctl(m, termios.TIOCSWINSZ, struct.pack("HHHH", 24, 80, 0, 0))
     screen = pyte.Screen(80, 24)
     stream = pyte.ByteStream(screen)

@@ -1,16 +1,16 @@
-"""Unit tests for LLM config resolution from env and ~/.relai/llm.conf.
+"""Unit tests for LLM config resolution from env and ~/.ludvart/llm.conf.
 
 Verifies that provider variables are read from the environment, fall back to a
-``~/.relai/llm.conf`` file, and that the environment always overrides the file.
+``~/.ludvart/llm.conf`` file, and that the environment always overrides the file.
 
 Run:
-    cd /local_home/bgerofi1/src/relai && source .venv/bin/activate \
+    cd /local_home/bgerofi1/src/ludvart && source .venv/bin/activate \
         && python tools/test_llm_conf.py
 """
 
 import os
 
-from relai.llm import _getvar, _load_conf, _read_provider, resolve_config
+from ludvart.llm import _getvar, _load_conf, _read_provider, resolve_config
 
 
 def _write(path, text):
@@ -87,8 +87,8 @@ def test_read_provider_from_file_and_override():
 
 
 def test_resolve_config_uses_conf_file(tmp):
-    # Point HOME at a temp dir so ~/.relai/llm.conf resolves there.
-    path = os.path.join(tmp, ".relai", "llm.conf")
+    # Point HOME at a temp dir so ~/.ludvart/llm.conf resolves there.
+    path = os.path.join(tmp, ".ludvart", "llm.conf")
     _write(
         path,
         "ANTHROPIC_API_URL=https://api.anthropic.com\n"

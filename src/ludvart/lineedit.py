@@ -2,7 +2,7 @@
 
 This deliberately avoids any terminal/UI concerns: it is just a string plus a
 cursor position and the edit operations a line editor needs (insert, delete,
-cursor movement, word/line kills). The relai panel feeds it decoded key events
+cursor movement, word/line kills). The ludvart panel feeds it decoded key events
 and renders it; nothing here reads or writes the terminal.
 
 The logic is intentionally simple and index-based (one index == one Unicode

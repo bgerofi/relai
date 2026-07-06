@@ -3,7 +3,7 @@
 This exercises the *infrastructure* only -- it never calls a real LLM. A
 ``FakeLLM`` stands in for the model: the conversation turns and the compacted
 summary are hand-written to look like something an LLM would produce, so the
-tests can verify how relai stores, purges, marks, persists and reloads them.
+tests can verify how ludvart stores, purges, marks, persists and reloads them.
 
 Covers:
 - ``working_history`` slicing to the latest summary marker.
@@ -13,7 +13,7 @@ Covers:
   resumes from the latest summary while keeping the full visible transcript.
 
 Run:
-    cd /local_home/bgerofi1/src/relai && source .venv/bin/activate \
+    cd /local_home/bgerofi1/src/ludvart && source .venv/bin/activate \
         && python tools/test_context_compaction.py
 """
 
@@ -22,20 +22,20 @@ import os
 import tempfile
 from pathlib import Path
 
-from relai.relai import Relai
-from relai.panel import AiPanel
-from relai.session import (
+from ludvart.ludvart import Ludvart
+from ludvart.panel import AiPanel
+from ludvart.session import (
     SUMMARY_MARKER,
     SessionStore,
     list_sessions,
     load_session,
     working_history,
 )
-from relai.llm import Turn
+from ludvart.llm import Turn
 
 
 # A made-up multi-turn conversation (user request -> assistant answer), written
-# to resemble a real relai debugging session. Used to populate the history the
+# to resemble a real ludvart debugging session. Used to populate the history the
 # way the panel would before a compaction.
 SAMPLE_CONVERSATION = [
     (
@@ -119,9 +119,9 @@ class FakeLLM:
         return {"role": "user", "content": content}
 
 
-def _make_relai(root: Path) -> Relai:
-    os.environ["RELAI_SESSIONS_DIR"] = str(root)
-    r = Relai(["true"])
+def _make_ludvart(root: Path) -> Ludvart:
+    os.environ["LUDVART_SESSIONS_DIR"] = str(root)
+    r = Ludvart(["true"])
     r.llm = FakeLLM()
     r._panel = AiPanel(cols=80, height=8, provider="fake")
     r._phys_rows, r._phys_cols = 24, 80
@@ -130,11 +130,11 @@ def _make_relai(root: Path) -> Relai:
     return r
 
 
-def _seed_conversation(r: Relai, turns=SAMPLE_CONVERSATION) -> None:
+def _seed_conversation(r: Ludvart, turns=SAMPLE_CONVERSATION) -> None:
     """Populate history + transcript from ``turns`` the way the panel would.
 
     User turns are wrapped in the ``<screenContext>/<userRequest>`` envelope
-    relai actually sends, and each turn is persisted like a live session.
+    ludvart actually sends, and each turn is persisted like a live session.
     """
     for question, answer in turns:
         r._panel.add_user(question)
@@ -185,7 +185,7 @@ def test_working_history_slices_to_latest_summary():
 
 def test_no_compaction_below_threshold():
     root = Path(tempfile.mkdtemp())
-    r = _make_relai(root)
+    r = _make_ludvart(root)
     _seed_conversation(r)
     before = len(r._llm_history)
     r._panel.context_pct = 50.0
@@ -197,7 +197,7 @@ def test_no_compaction_below_threshold():
 
 def test_compaction_above_threshold_reseeds():
     root = Path(tempfile.mkdtemp())
-    r = _make_relai(root)
+    r = _make_ludvart(root)
     _seed_conversation(r)
     r._panel.context_pct = 85.0
     r._maybe_compact()
@@ -223,7 +223,7 @@ def test_compaction_above_threshold_reseeds():
 
 def test_seed_only_history_not_recompacted():
     root = Path(tempfile.mkdtemp())
-    r = _make_relai(root)
+    r = _make_ludvart(root)
     r._llm_history = [
         {"role": "user", "content": f"{SUMMARY_MARKER}\nbrief\n</conversationSummary>"},
         {"role": "assistant", "content": "ok"},
@@ -236,7 +236,7 @@ def test_seed_only_history_not_recompacted():
 
 def test_compact_command_compacts():
     root = Path(tempfile.mkdtemp())
-    r = _make_relai(root)
+    r = _make_ludvart(root)
     _run_actions_sync(r)
     _seed_conversation(r)
     before = len(r._llm_history)
@@ -252,7 +252,7 @@ def test_compact_command_compacts():
 
 def test_compact_command_noop_when_already_compact():
     root = Path(tempfile.mkdtemp())
-    r = _make_relai(root)
+    r = _make_ludvart(root)
     _run_actions_sync(r)
     r._llm_history = [
         {"role": "user", "content": f"{SUMMARY_MARKER}\nbrief\n</conversationSummary>"},
@@ -266,7 +266,7 @@ def test_compact_command_noop_when_already_compact():
 
 
 def test_compact_tab_completion():
-    from relai.session import complete_slash
+    from ludvart.session import complete_slash
 
     assert complete_slash("/comp") == "/compact "
     print("/compact tab completion: OK")
@@ -279,7 +279,7 @@ def test_end_to_end_log_and_reload():
     resumes from the latest summary while keeping the full visible transcript.
     """
     root = Path(tempfile.mkdtemp())
-    r = _make_relai(root)
+    r = _make_ludvart(root)
     _seed_conversation(r)
     session_id = r._session.session_id
 
@@ -311,11 +311,11 @@ def test_end_to_end_log_and_reload():
     assert after["llm_history"][0]["content"].lstrip().startswith(SUMMARY_MARKER)
     assert "DuplicateRefundError" not in json.dumps(after["llm_history"])
     kinds = [m[0] for m in after["messages"]]
-    assert "summary" in kinds and "you" in kinds and "relai" in kinds
+    assert "summary" in kinds and "you" in kinds and "ludvart" in kinds
     assert any("DuplicateRefundError" in text for (_k, text) in after["messages"])
 
     # Reload in a FRESH instance (the /sessions load path).
-    r2 = _make_relai(root)
+    r2 = _make_ludvart(root)
     r2._session_list = list_sessions()
     r2._load_session(session_id)
 

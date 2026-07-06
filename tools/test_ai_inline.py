@@ -1,7 +1,7 @@
-"""Drive relai through a PTY to test the inline Ctrl-G a AI chat end-to-end.
+"""Drive ludvart through a PTY to test the inline Ctrl-G a AI chat end-to-end.
 
 Uses select() with timeouts and an overall wall-clock cap so it can never hang.
-Verifies the inline exchange appears in the scroll flow and that relai did NOT
+Verifies the inline exchange appears in the scroll flow and that ludvart did NOT
 switch to the alternate screen for a line-oriented (shell) session.
 """
 
@@ -38,7 +38,7 @@ def drain(fd, seconds):
 
 
 def main():
-    argv = ["relai", "--", "bash", "--norc", "-i"]
+    argv = ["ludvart", "--", "bash", "--norc", "-i"]
     pid, master = pty.fork()
     if pid == 0:
         os.environ["PS1"] = "$ "
@@ -55,7 +55,7 @@ def main():
         transcript.extend(drain(master, wait))
 
     try:
-        transcript.extend(drain(master, 8.0))          # relai + bash start
+        transcript.extend(drain(master, 8.0))          # ludvart + bash start
         send(b"echo HELLO_FROM_SCREEN_42\n", 1.0)      # screen content
         send(b"\x07", 0.3)                             # Ctrl-G
         send(b"a", 0.5)                                # inline AI
@@ -81,7 +81,7 @@ def main():
     sys.stdout.write(repr(text[-2500:]))
     sys.stdout.write("\n===== SUMMARY =====\n")
     checks = {
-        "inline prompt shown": "relai> " in text,
+        "inline prompt shown": "ludvart> " in text,
         "question echoed": "What number appears" in text,
         "thinking indicator": "thinking" in lower,
         "answer mentions 42": "42" in lower.split("thinking")[-1],

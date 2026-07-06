@@ -19,7 +19,7 @@ import types
 
 sys.path.insert(0, os.path.join(os.path.dirname(__file__), "..", "src"))
 
-from relai.relai import Relai as RelayPTY
+from ludvart.ludvart import Ludvart as RelayPTY
 
 
 class FakeScreen:

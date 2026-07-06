@@ -6,7 +6,7 @@ prompt; printing there scrolls older output up (into the terminal's native
 scrollback) and leaves the prompt row untouched. The cursor is restored into
 the prompt afterward.
 
-Because relai never erases or reprints the child's prompt, the child's line
+Because ludvart never erases or reprints the child's prompt, the child's line
 editor (readline, zle, ...) keeps full ownership of its prompt and input
 buffer. There is no resync and no double-printed prompt, regardless of how the
 prompt is styled (colors, git status, multiple lines).
@@ -29,7 +29,7 @@ _HIDE_CURSOR = b"\x1b[?25l"
 _SHOW_CURSOR = b"\x1b[?25h"
 
 #: Prefix shown on the question line the user types into.
-_QUESTION_PROMPT = "relai> "
+_QUESTION_PROMPT = "ludvart> "
 
 
 def _move_to(row: int, col: int) -> bytes:
@@ -91,8 +91,8 @@ class InlineChat:
             _write_all(self.out_fd, _DIM + label.encode("utf-8", "replace") + _RESET_SGR)
             try:
                 reply = ask(question)
-            except Exception as exc:  # surfaced to the user, never crashes relai
-                reply = f"[relai] request failed: {exc}"
+            except Exception as exc:  # surfaced to the user, never crashes ludvart
+                reply = f"[ludvart] request failed: {exc}"
 
             self._print_reply(reply)
         finally:
@@ -205,7 +205,7 @@ class InlineChat:
         try:
             reply = ask(question)
         except Exception as exc:
-            reply = f"[relai] request failed: {exc}"
+            reply = f"[ludvart] request failed: {exc}"
         _write_all(self.out_fd, b"\r" + _CLEAR_LINE)
         for paragraph in reply.splitlines() or [""]:
             for segment in _wrap(paragraph, self.cols) or [""]:

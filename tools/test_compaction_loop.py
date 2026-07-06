@@ -18,10 +18,10 @@ from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1] / "src"))
 
-from relai.llm import ToolCall, Turn, Usage  # noqa: E402
-from relai.panel import AiPanel  # noqa: E402
-from relai.relai import Relai  # noqa: E402
-from relai.session import SessionStore  # noqa: E402
+from ludvart.llm import ToolCall, Turn, Usage  # noqa: E402
+from ludvart.panel import AiPanel  # noqa: E402
+from ludvart.ludvart import Ludvart  # noqa: E402
+from ludvart.session import SessionStore  # noqa: E402
 
 SUMMARY_TEXT = "COMPACTED-BRIEF: continue the task."
 
@@ -89,9 +89,9 @@ class _ToolLoopLLM:
         return {"role": "user", "content": content}
 
 
-def _make_relai(root: Path) -> Relai:
-    os.environ["RELAI_SESSIONS_DIR"] = str(root)
-    r = Relai(["true"])
+def _make_ludvart(root: Path) -> Ludvart:
+    os.environ["LUDVART_SESSIONS_DIR"] = str(root)
+    r = Ludvart(["true"])
     r._panel = AiPanel(cols=80, height=8, provider="fake")
     r._phys_rows, r._phys_cols = 24, 80
     r._render_split = lambda: None
@@ -101,7 +101,7 @@ def _make_relai(root: Path) -> Relai:
 
 
 def test_compacts_inside_agent_loop(tmp_path: Path):
-    r = _make_relai(tmp_path)
+    r = _make_ludvart(tmp_path)
     # A long agentic ask: several tool round-trips whose reported context usage
     # climbs above the 80% threshold mid-loop, then a final answer.
     r.llm = _ToolLoopLLM([30.0, 60.0, 92.0, 40.0])
@@ -122,7 +122,7 @@ def test_compacts_inside_agent_loop(tmp_path: Path):
 
 
 def test_no_compaction_when_under_threshold(tmp_path: Path):
-    r = _make_relai(tmp_path)
+    r = _make_ludvart(tmp_path)
     r.llm = _ToolLoopLLM([20.0, 30.0, 25.0])
     result = r._ask_llm("short task")
     assert result == "final answer", result
@@ -134,7 +134,7 @@ def test_no_compaction_when_under_threshold(tmp_path: Path):
 
 def test_badge_reflects_overshoot(tmp_path: Path):
     # Even with a single turn over budget, the panel badge shows the true >100%.
-    r = _make_relai(tmp_path)
+    r = _make_ludvart(tmp_path)
     r.llm = _ToolLoopLLM([135.0])  # single turn, no tools, 135% usage
     # Only one entry -> it is the final answer immediately; usage set on panel.
     r._ask_llm("q")

@@ -3,7 +3,7 @@ Ctrl-G PageUp resizes it to half the screen, and Ctrl-G PageDown restores the
 previous height.
 
 Run:
-    cd /local_home/bgerofi1/src/relai && source .venv/bin/activate \
+    cd /local_home/bgerofi1/src/ludvart && source .venv/bin/activate \
         && python tools/test_ai_half_resize_e2e.py
 """
 
@@ -34,9 +34,9 @@ def pump(fd, stream, seconds):
 
 
 def header_row(screen):
-    """Index of the panel header row (the reverse-video 'relai ·' bar)."""
+    """Index of the panel header row (the reverse-video 'ludvart ·' bar)."""
     for i, row in enumerate(screen.display):
-        if "relai" in row and ("close" in row or "resize" in row):
+        if "ludvart" in row and ("close" in row or "resize" in row):
             return i
     return -1
 
@@ -52,7 +52,7 @@ def main():
     if pid == 0:
         os.environ["PS1"] = "$ "
         os.environ["TERM"] = "xterm"
-        os.execvp("relai", ["relai", "--", "bash", "--norc", "-i"])
+        os.execvp("ludvart", ["ludvart", "--", "bash", "--norc", "-i"])
     fcntl.ioctl(m, termios.TIOCSWINSZ, struct.pack("HHHH", ROWS, COLS, 0, 0))
     screen = pyte.Screen(COLS, ROWS)
     stream = pyte.ByteStream(screen)

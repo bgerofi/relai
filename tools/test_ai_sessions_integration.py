@@ -1,11 +1,11 @@
 """Integration tests for session persistence + slash commands in the panel.
 
-Drives the panel wiring on a Relai instance without spawning a real PTY: it
+Drives the panel wiring on a Ludvart instance without spawning a real PTY: it
 stubs the LLM ask and the renderer, feeds keystrokes/questions, and checks the
 on-disk conversation files and in-panel behaviour.
 
 Run:
-    cd /local_home/bgerofi1/src/relai && source .venv/bin/activate \
+    cd /local_home/bgerofi1/src/ludvart && source .venv/bin/activate \
         && python tools/test_ai_sessions_integration.py
 """
 
@@ -14,14 +14,14 @@ import os
 import tempfile
 from pathlib import Path
 
-from relai.relai import Relai
-from relai.panel import AiPanel
-from relai.session import SessionStore
+from ludvart.ludvart import Ludvart
+from ludvart.panel import AiPanel
+from ludvart.session import SessionStore
 
 
-def make_relai(root: Path):
-    os.environ["RELAI_SESSIONS_DIR"] = str(root)
-    r = Relai(["true"])
+def make_ludvart(root: Path):
+    os.environ["LUDVART_SESSIONS_DIR"] = str(root)
+    r = Ludvart(["true"])
     r.llm = object()  # truthy so _ai_ask_callback would use the LLM path
     r._panel = AiPanel(cols=80, height=8, provider="test")
     r._phys_rows, r._phys_cols = 24, 80
@@ -57,7 +57,7 @@ def type_and_submit(r, text):
 
 def test_new_session_created_on_open():
     root = Path(tempfile.mkdtemp())
-    r = make_relai(root)
+    r = make_ludvart(root)
     assert r._session is None
     # Simulate the part of _open_panel that starts a session.
     r._session = SessionStore()
@@ -72,22 +72,22 @@ def test_new_session_created_on_open():
 
 def test_conversation_saved_and_extended():
     root = Path(tempfile.mkdtemp())
-    r = make_relai(root)
+    r = make_ludvart(root)
     r._session = SessionStore()
 
     type_and_submit(r, "hello")
     conv = r._session.path
     assert conv.is_file(), "conversation.json should exist after first turn"
     data = json.loads(conv.read_text())
-    assert data["messages"] == [["you", "hello"], ["relai", "echo:hello"]]
+    assert data["messages"] == [["you", "hello"], ["ludvart", "echo:hello"]]
 
     type_and_submit(r, "again")
     data = json.loads(conv.read_text())
     assert [m for m in data["messages"]] == [
         ["you", "hello"],
-        ["relai", "echo:hello"],
+        ["ludvart", "echo:hello"],
         ["you", "again"],
-        ["relai", "echo:again"],
+        ["ludvart", "echo:again"],
     ]
     assert len(data["llm_history"]) == 4
     print("conversation saved + extended: OK")
@@ -95,7 +95,7 @@ def test_conversation_saved_and_extended():
 
 def test_slash_command_not_persisted():
     root = Path(tempfile.mkdtemp())
-    r = make_relai(root)
+    r = make_ludvart(root)
     r._session = SessionStore()
     type_and_submit(r, "hello")
 
@@ -106,7 +106,7 @@ def test_slash_command_not_persisted():
 
     data = json.loads(r._session.path.read_text())
     saved_kinds = [m[0] for m in data["messages"]]
-    assert saved_kinds == ["you", "relai"], saved_kinds
+    assert saved_kinds == ["you", "ludvart"], saved_kinds
     print("slash command not persisted: OK")
 
 
@@ -120,12 +120,12 @@ def test_sessions_list_and_load():
         root=root, started_at=datetime(2026, 7, 1, 9, 0, 0, tzinfo=timezone.utc)
     )
     old.save(
-        [("you", "old question"), ("relai", "old answer")],
+        [("you", "old question"), ("ludvart", "old answer")],
         [{"role": "user", "content": "old question"},
          {"role": "assistant", "content": "old answer"}],
     )
 
-    r = make_relai(root)
+    r = make_ludvart(root)
     r._session = SessionStore()  # a fresh current session
     type_and_submit(r, "current")
 
@@ -154,7 +154,7 @@ def test_sessions_list_and_load():
 
 def test_load_by_id_and_errors():
     root = Path(tempfile.mkdtemp())
-    r = make_relai(root)
+    r = make_ludvart(root)
     r._session = SessionStore()
 
     # load without listing, by explicit id that doesn't exist
@@ -176,7 +176,7 @@ def test_load_by_id_and_errors():
 
 def test_tab_completion_in_panel():
     root = Path(tempfile.mkdtemp())
-    r = make_relai(root)
+    r = make_ludvart(root)
     r._session = SessionStore()
 
     for ch in "/sess":

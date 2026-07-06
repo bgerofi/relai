@@ -4,7 +4,7 @@ Builds real provider clients (offline, dummy key) and swaps in a fake SDK
 client so the models endpoint can be simulated without network access.
 
 Run:
-    cd /local_home/bgerofi1/src/relai && source .venv/bin/activate \
+    cd /local_home/bgerofi1/src/ludvart && source .venv/bin/activate \
         && python tools/test_context_window_detect.py
 """
 
@@ -12,7 +12,7 @@ import json
 import os
 import tempfile
 
-from relai.llm import (
+from ludvart.llm import (
     DEFAULT_TIMEOUT,
     ProviderConfig,
     _client_for,
@@ -82,8 +82,8 @@ def test_known_table():
 def test_context_windows_file():
     with tempfile.TemporaryDirectory() as d:
         path = os.path.join(d, "context_windows.json")
-        prev = os.environ.get("RELAI_CONTEXT_WINDOWS")
-        os.environ["RELAI_CONTEXT_WINDOWS"] = path
+        prev = os.environ.get("LUDVART_CONTEXT_WINDOWS")
+        os.environ["LUDVART_CONTEXT_WINDOWS"] = path
         try:
             # first run: defaults are written, self-documented, and used
             assert not os.path.exists(path)
@@ -114,9 +114,9 @@ def test_context_windows_file():
             assert _known_context_window("gpt-4o-mini") == 128_000
         finally:
             if prev is None:
-                os.environ.pop("RELAI_CONTEXT_WINDOWS", None)
+                os.environ.pop("LUDVART_CONTEXT_WINDOWS", None)
             else:
-                os.environ["RELAI_CONTEXT_WINDOWS"] = prev
+                os.environ["LUDVART_CONTEXT_WINDOWS"] = prev
     print("context-windows file: OK")
 
 
@@ -219,9 +219,9 @@ def test_verify_triggers_detection():
 
 if __name__ == "__main__":
     # Point default-based tests at a nonexistent file so they exercise the
-    # built-in defaults regardless of any real ~/.relai/context_windows.json.
-    os.environ["RELAI_CONTEXT_WINDOWS"] = os.path.join(
-        tempfile.gettempdir(), "relai-nonexistent-context-windows.json"
+    # built-in defaults regardless of any real ~/.ludvart/context_windows.json.
+    os.environ["LUDVART_CONTEXT_WINDOWS"] = os.path.join(
+        tempfile.gettempdir(), "ludvart-nonexistent-context-windows.json"
     )
     test_known_table()
     test_context_windows_file()

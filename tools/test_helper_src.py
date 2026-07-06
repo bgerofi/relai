@@ -1,11 +1,11 @@
-"""Unit tests for the embedded golden relai_helper (helper_src.py).
+"""Unit tests for the embedded golden ludvart_helper (helper_src.py).
 
 Covers: the asset loads and matches its pinned checksum; the install command is
 well-formed, single-quote-safe, and self-contained; and running it against a
 throwaway HOME installs, then reports "current", then repairs a tampered copy.
 
 Run:
-    cd /local_home/bgerofi1/src/relai && source .venv/bin/activate \
+    cd /local_home/bgerofi1/src/ludvart && source .venv/bin/activate \
         && python tools/test_helper_src.py
 """
 
@@ -16,23 +16,23 @@ import shutil
 import subprocess
 import tempfile
 
-from relai.helper_src import (
-    RELAI_HELPER_MD5,
-    RELAI_HELPER_MD5_EXPECTED,
-    RELAI_HELPER_SOURCE,
-    RELAI_HELPER_VERSION,
+from ludvart.helper_src import (
+    LUDVART_HELPER_MD5,
+    LUDVART_HELPER_MD5_EXPECTED,
+    LUDVART_HELPER_SOURCE,
+    LUDVART_HELPER_VERSION,
     helper_install_command,
     helper_install_payload_b64,
 )
 
 
 def test_asset_integrity():
-    assert RELAI_HELPER_MD5 == RELAI_HELPER_MD5_EXPECTED
-    assert RELAI_HELPER_MD5 == hashlib.md5(RELAI_HELPER_SOURCE).hexdigest()
+    assert LUDVART_HELPER_MD5 == LUDVART_HELPER_MD5_EXPECTED
+    assert LUDVART_HELPER_MD5 == hashlib.md5(LUDVART_HELPER_SOURCE).hexdigest()
     # Version derived from the source matches the source's VER line.
-    assert re.search(rb'^VER\s*=\s*"%s"' % RELAI_HELPER_VERSION.encode(),
-                     RELAI_HELPER_SOURCE, re.MULTILINE)
-    assert RELAI_HELPER_SOURCE.startswith(b"#!")
+    assert re.search(rb'^VER\s*=\s*"%s"' % LUDVART_HELPER_VERSION.encode(),
+                     LUDVART_HELPER_SOURCE, re.MULTILINE)
+    assert LUDVART_HELPER_SOURCE.startswith(b"#!")
     print("asset integrity + version: OK")
 
 
@@ -45,7 +45,7 @@ def test_source_is_py36_compatible():
     """
     import ast
 
-    src = RELAI_HELPER_SOURCE
+    src = LUDVART_HELPER_SOURCE
     # subprocess.run(..., capture_output=True) is 3.7+; we use Popen instead.
     assert b"capture_output" not in src, "capture_output is Python 3.7+"
     # add_subparsers(required=...) keyword is 3.7+; must be enforced manually.
@@ -70,11 +70,11 @@ def test_runs_under_old_python_if_available():
         print("no old python found; skipped (scan test covers compatibility)")
         return
     with tempfile.NamedTemporaryFile("wb", suffix=".py", delete=False) as fh:
-        fh.write(RELAI_HELPER_SOURCE)
+        fh.write(LUDVART_HELPER_SOURCE)
         script = fh.name
     try:
         r = subprocess.run([old, script, "info"], capture_output=True, text=True)
-        assert r.returncode == 0 and "RELAI:BEGIN op=info" in r.stdout, (old, r.stderr)
+        assert r.returncode == 0 and "LUDVART:BEGIN op=info" in r.stdout, (old, r.stderr)
     finally:
         os.unlink(script)
     print("runs under %s: OK" % old)
@@ -101,14 +101,14 @@ def _run(cmd, home):
 def test_install_current_and_repair():
     cmd = helper_install_command()
     with tempfile.TemporaryDirectory() as home:
-        dest = os.path.join(home, ".relai", "bin", "relai_helper")
+        dest = os.path.join(home, ".ludvart", "bin", "ludvart_helper")
 
         # 1. Fresh install.
         out = _run(cmd, home).stdout
         assert "status=installed" in out and "ok=1" in out and "reason=missing" in out, out
         assert os.path.isfile(dest)
         assert os.access(dest, os.X_OK), "helper must be executable"
-        assert hashlib.md5(open(dest, "rb").read()).hexdigest() == RELAI_HELPER_MD5
+        assert hashlib.md5(open(dest, "rb").read()).hexdigest() == LUDVART_HELPER_MD5
 
         # 2. Already current -> no rewrite.
         out = _run(cmd, home).stdout
@@ -117,14 +117,14 @@ def test_install_current_and_repair():
         # 3. Tamper, then repair.
         with open(dest, "ab") as fh:
             fh.write(b"\n# sneaky change\n")
-        assert hashlib.md5(open(dest, "rb").read()).hexdigest() != RELAI_HELPER_MD5
+        assert hashlib.md5(open(dest, "rb").read()).hexdigest() != LUDVART_HELPER_MD5
         out = _run(cmd, home).stdout
         assert "status=installed" in out and "reason=stale_or_modified" in out, out
-        assert hashlib.md5(open(dest, "rb").read()).hexdigest() == RELAI_HELPER_MD5
+        assert hashlib.md5(open(dest, "rb").read()).hexdigest() == LUDVART_HELPER_MD5
 
         # 4. The repaired helper actually runs (info + a run subcommand).
         info = subprocess.run([dest, "info"], capture_output=True, text=True)
-        assert info.returncode == 0 and "RELAI:BEGIN op=info" in info.stdout, info.stdout
+        assert info.returncode == 0 and "LUDVART:BEGIN op=info" in info.stdout, info.stdout
         import base64 as _b64
         payload = _b64.b64encode(b"echo hi").decode()
         run = subprocess.run([dest, "run", "--b64", payload],

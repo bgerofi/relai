@@ -1,12 +1,12 @@
 """Unit tests for the first-run LLM setup: ``write_provider_conf``.
 
 Verifies that the setup wizard's file writer persists the correct provider
-variable names to ``~/.relai/llm.conf``, updates them in place on re-run,
+variable names to ``~/.ludvart/llm.conf``, updates them in place on re-run,
 preserves unrelated lines, applies 0600 permissions, and round-trips back
 through the normal config resolution (``_load_conf`` / ``resolve_config``).
 
 Run:
-    cd /local_home/bgerofi1/src/relai && source .venv/bin/activate \
+    cd /local_home/bgerofi1/src/ludvart && source .venv/bin/activate \
         && python tools/test_llm_setup.py
 """
 
@@ -14,7 +14,7 @@ import os
 import stat
 import tempfile
 
-from relai.llm import _load_conf, _read_provider, write_provider_conf
+from ludvart.llm import _load_conf, _read_provider, write_provider_conf
 
 
 def test_writes_expected_var_names(tmp):

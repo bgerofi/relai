@@ -6,13 +6,13 @@ shapes returned by the OpenAI, Anthropic, and Google SDKs -- so no network,
 API keys, or provider packages are required.
 
 Run:
-    cd /local_home/bgerofi1/src/relai && source .venv/bin/activate \
+    cd /local_home/bgerofi1/src/ludvart && source .venv/bin/activate \
         && python tools/test_llm_usage.py
 """
 
 from types import SimpleNamespace
 
-from relai.llm import Usage, usage_from_response
+from ludvart.llm import Usage, usage_from_response
 
 
 def test_context_percent_basic():
@@ -40,8 +40,8 @@ def test_context_percent_over_100():
 def test_known_context_window_claude4_is_1m():
     # The Claude 4 family (Opus 4.x / Sonnet 4.x) has a 1M window; older Claude
     # models remain 200k. Prevents over-estimating usage on endpoints whose
-    # models API is not exposed (so relai must fall back to this table).
-    from relai.llm import _known_context_window
+    # models API is not exposed (so ludvart must fall back to this table).
+    from ludvart.llm import _known_context_window
     assert _known_context_window("claude-opus-4-8") == 1_000_000
     assert _known_context_window("claude-sonnet-4-5") == 1_000_000
     assert _known_context_window("claude-3-5-sonnet") == 200_000
@@ -112,16 +112,16 @@ def test_partial_and_bad_values():
 
 # (runner appended at end of file)
 
-# -- panel prompt badge (in front of "relai> ") ---------------------------
+# -- panel prompt badge (in front of "ludvart> ") ---------------------------
 
-from relai.panel import AiPanel
+from ludvart.panel import AiPanel
 
 
 def _find_input_row(panel):
     rows = panel.render(height=8, cols=80)
     # The input row is the last non-empty row containing the prompt bytes.
     for row in reversed(rows):
-        if b"relai> " in row:
+        if b"ludvart> " in row:
             return row
     raise AssertionError("no input row with prompt found")
 
@@ -143,7 +143,7 @@ def test_panel_prompt_shows_badge():
     row = _find_input_row(panel)
     assert b"[45%] " in row
     # The badge comes before the prompt on the row.
-    assert row.index(b"[45%] ") < row.index(b"relai> ")
+    assert row.index(b"[45%] ") < row.index(b"ludvart> ")
     print("panel prompt shows badge: OK")
 
 
@@ -159,7 +159,7 @@ def test_panel_cursor_col_accounts_for_badge():
 
 # -- base converse plumbs _last_usage into the Turn -----------------------
 
-from relai.llm import LLMClient, ProviderConfig, Turn
+from ludvart.llm import LLMClient, ProviderConfig, Turn
 
 
 class _FakeClient(LLMClient):

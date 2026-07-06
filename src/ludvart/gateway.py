@@ -1,7 +1,7 @@
 """GitHub Copilot support via a local LiteLLM gateway.
 
-relai can use GitHub Copilot as an OpenAI-compatible backend by spawning a local
-``litellm`` proxy that fronts LiteLLM's ``github_copilot/`` provider. relai then
+ludvart can use GitHub Copilot as an OpenAI-compatible backend by spawning a local
+``litellm`` proxy that fronts LiteLLM's ``github_copilot/`` provider. ludvart then
 talks to that proxy with its normal OpenAI-compatible client.
 
 Authentication uses GitHub's OAuth device flow (implemented by LiteLLM): on first
@@ -30,8 +30,8 @@ import urllib.request
 #: The gateway only ever listens on loopback.
 GATEWAY_HOST = "127.0.0.1"
 #: The local proxy is started without a master key, so any non-empty API key is
-#: accepted. relai passes this placeholder to its OpenAI-compatible client.
-GATEWAY_API_KEY = "sk-relai-local"
+#: accepted. ludvart passes this placeholder to its OpenAI-compatible client.
+GATEWAY_API_KEY = "sk-ludvart-local"
 
 
 class GatewayError(RuntimeError):
@@ -121,7 +121,7 @@ def list_copilot_models() -> list[str]:
 
     Best-effort: returns an empty list if litellm is missing, the account isn't
     authenticated yet, or the request fails. The slugs (e.g. ``claude-opus-4.8``,
-    ``gpt-4o``) are what relai stores as ``COPILOT_MODEL``.
+    ``gpt-4o``) are what ludvart stores as ``COPILOT_MODEL``.
     """
     try:
         import httpx
@@ -153,7 +153,7 @@ def _free_port(host: str) -> int:
 
 
 class CopilotGateway:
-    """A local ``litellm`` proxy fronting GitHub Copilot for relai.
+    """A local ``litellm`` proxy fronting GitHub Copilot for ludvart.
 
     Spawn with :meth:`start`, point an OpenAI-compatible client at
     :attr:`base_url` using model :attr:`litellm_model`, and call :meth:`stop`
@@ -172,7 +172,7 @@ class CopilotGateway:
         self.host = host
         self.port = port or _free_port(host)
         self.log_path = log_path or os.path.join(
-            os.path.expanduser("~"), ".relai", "copilot-gateway.log"
+            os.path.expanduser("~"), ".ludvart", "copilot-gateway.log"
         )
         self._proc: subprocess.Popen | None = None
 
@@ -205,7 +205,7 @@ class CopilotGateway:
         ]
         # Detach into its own process group so we can tear down the whole tree,
         # and route its noisy output to a log file (never the terminal, which
-        # relai composites at runtime).
+        # ludvart composites at runtime).
         with open(self.log_path, "ab", buffering=0) as logf:
             self._proc = subprocess.Popen(
                 cmd,

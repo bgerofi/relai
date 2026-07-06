@@ -14,4 +14,4 @@ dist/
 
 # Local config / secrets
 .env
-*.relai.bak
+*.ludvart.bak

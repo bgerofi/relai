@@ -3,7 +3,7 @@
 Spawns a child command in a pseudo-terminal and shuttles bytes between the real
 terminal and the child. Output is passed through verbatim (so any program --
 including full-screen ncurses apps and nested ssh/tmux sessions -- behaves
-exactly as if relai were not there) while also being fed into a ``pyte`` screen
+exactly as if ludvart were not there) while also being fed into a ``pyte`` screen
 model that maintains a live 2D view of the terminal. That screen model is the
 foundation the AI overlay/agent will later read from.
 """
@@ -32,8 +32,8 @@ import pyte
 from .overlay import ScrollbackViewer
 from .panel import AiPanel
 from .render import Compositor, render_row
-from .screen import RelaiScreen
-from .helper_src import RELAI_HELPER_VERSION, helper_install_command
+from .screen import LudvartScreen
+from .helper_src import LUDVART_HELPER_VERSION, helper_install_command
 from .mcp import McpManager
 from .session import (
     SessionStore,
@@ -50,7 +50,7 @@ from .llm import ToolSpec
 if TYPE_CHECKING:
     from .llm import LLMClient, ToolCall
 
-# relai commands are entered with a prefix key (like screen/tmux) followed by a
+# ludvart commands are entered with a prefix key (like screen/tmux) followed by a
 # command letter. A single-byte control character is used as the prefix so no
 # terminal emulator remaps it and it survives SSH and nested screen/tmux.
 #
@@ -63,7 +63,7 @@ DEFAULT_PREFIX = b"\x07"  # Ctrl-G
 
 # In addition to the prefix commands, a single dedicated "summon" key opens the
 # AI panel in one keystroke. Ctrl-O (0x0F) is used because screen (Ctrl-A) and
-# tmux (Ctrl-B) leave it alone, so it works even when relai runs inside them.
+# tmux (Ctrl-B) leave it alone, so it works even when ludvart runs inside them.
 # To send a literal Ctrl-O to the child, use ``<prefix> o``.
 DEFAULT_SUMMON = b"\x0f"  # Ctrl-O
 
@@ -78,39 +78,39 @@ _PASTE_END = b"\x1b[201~"
 # Appended verbatim to the LLM system prompt on every invocation. Documents the
 # self-generated, persistent helper tooling the agent can maintain on the remote
 # machine to work around the harness only being able to see the terminal.
-RELAI_HELPERS_DOC = """\
-## relai helpers (self-generated tools on the remote machine)
+LUDVART_HELPERS_DOC = """\
+## ludvart helpers (self-generated tools on the remote machine)
 
 The harness only sees the terminal; it has no direct file/exec access to the
-remote box. To work around this, relai maintains small, dependency-free helper
-tools under ~/.relai/bin/ on the remote machine. These persist across sessions.
+remote box. To work around this, ludvart maintains small, dependency-free helper
+tools under ~/.ludvart/bin/ on the remote machine. These persist across sessions.
 
 ### First step every session (cheap): detect them
-Run:  ls -la ~/.relai/bin/ 2>/dev/null && ~/.relai/bin/relai_helper info 2>/dev/null
-If `relai_helper` exists, prefer it for file read/edit/search (see spec below).
+Run:  ls -la ~/.ludvart/bin/ 2>/dev/null && ~/.ludvart/bin/ludvart_helper info 2>/dev/null
+If `ludvart_helper` exists, prefer it for file read/edit/search (see spec below).
 If it's missing and a task would benefit, offer to (re)create it, or do so when
 the user says "initialize your helpers".
 
 ### "initialize your helpers" ritual
-  1. Detect what exists (ls ~/.relai/bin, and `relai_helper info`).
+  1. Detect what exists (ls ~/.ludvart/bin, and `ludvart_helper info`).
   2. Confirm desired capabilities (default set: read, write, append, replace,
      search, run).
-  3. (Re)generate helper(s) into ~/.relai/bin/, chmod +x, then VALIDATE:
+  3. (Re)generate helper(s) into ~/.ludvart/bin/, chmod +x, then VALIDATE:
      python3 -c "import ast; ast.parse(open(PATH).read())" and a smoke test.
      Build large files by appending in chunks via QUOTED heredocs with
      inject_input escape-interpretation DISABLED (so \\n, backslashes, quotes
      arrive verbatim); verify with `wc -l` after each chunk.
   4. Report what was created and how to call it.
-### relai_helper — precise interface (v0.1.0, stdlib Python 3 only)
-Path: ~/.relai/bin/relai_helper   (executable)
+### ludvart_helper — precise interface (v0.1.0, stdlib Python 3 only)
+Path: ~/.ludvart/bin/ludvart_helper   (executable)
 Design: every CONTENT payload is base64 (immune to quoting/newline/escape
 corruption); every result is sentinel-framed with an exit code, so output is
 parsed deterministically, NOT inferred from screen text.
 
 Output frame (always):
-    <<<RELAI:BEGIN op=NAME>>>
+    <<<LUDVART:BEGIN op=NAME>>>
     <base64 payload, present only when there is output>
-    <<<RELAI:END op=NAME exit=CODE  key=val ...>>>
+    <<<LUDVART:END op=NAME exit=CODE  key=val ...>>>
 To read a payload: take the line(s) between BEGIN and END and `base64 -d`.
 Trust the `exit=` field for success/failure.
 
@@ -139,23 +139,23 @@ Subcommands:
       command's real exit status. NOTE: for a pipeline/;-list this is the
       status of the LAST command, same as normal shell semantics.
   info
-      Payload = base64 of "relai_helper <ver>\\ncaps=...\\npython=...".
-      Use this (or `relai_helper <subcmd> -h`) to re-derive the interface in a
+      Payload = base64 of "ludvart_helper <ver>\\ncaps=...\\npython=...".
+      Use this (or `ludvart_helper <subcmd> -h`) to re-derive the interface in a
       fresh session if this spec is ever unavailable.
 ### Usage conventions
   - Pass content/commands as base64:  --b64 "$(printf %s "$TEXT" | base64 -w0)"
     (use `base64 -w0` to avoid line wrapping).
-  - Prefer relai_helper over raw shell for reading, editing, and searching
+  - Prefer ludvart_helper over raw shell for reading, editing, and searching
     files -- it eliminates quoting/escape corruption and gives a reliable exit
     code. Plain shell is fine when it's genuinely simpler.
-  - Parse results from the RELAI:BEGIN/END frame and base64-decode the payload;
+  - Parse results from the LUDVART:BEGIN/END frame and base64-decode the payload;
     rely on `exit=` rather than reading success from screen text.
-  - Keep helpers under ~/.relai/ (outside the user's repos) so they never show
+  - Keep helpers under ~/.ludvart/ (outside the user's repos) so they never show
     up in git status.
   - The helper is a convenience, not a requirement. If it's missing, offer to
     recreate it, but don't block work on it.
-  - When self-recovering the interface, run `~/.relai/bin/relai_helper info`
-    and `~/.relai/bin/relai_helper <subcmd> -h`."""
+  - When self-recovering the interface, run `~/.ludvart/bin/ludvart_helper info`
+    and `~/.ludvart/bin/ludvart_helper <subcmd> -h`."""
 
 
 def _get_winsize(fd: int) -> tuple[int, int]:
@@ -186,7 +186,7 @@ def _set_winsize(fd: int, rows: int, cols: int) -> None:
         pass
 
 
-class Relai:
+class Ludvart:
     """A transparent PTY relay around a single child command.
 
     Parameters
@@ -195,14 +195,14 @@ class Relai:
         The argv of the command to spawn (e.g. ``["bash"]`` or
         ``["ssh", "host"]``).
     prefix:
-        The single-byte prefix key that introduces a relai command. Defaults to
+        The single-byte prefix key that introduces a ludvart command. Defaults to
         Ctrl-G. Pressing it twice sends a literal prefix byte to the child.
     summon:
         The single-byte key that opens the AI panel in one keystroke. Defaults
         to Ctrl-O, which screen/tmux leave alone. Use ``<prefix> o`` to send a
         literal summon byte to the child.
     llm:
-        An optional, already-verified LLM client. When ``None``, relai runs as a
+        An optional, already-verified LLM client. When ``None``, ludvart runs as a
         plain relay with AI features disabled.
     """
 
@@ -262,7 +262,7 @@ class Relai:
         self._old_term_attrs: list | None = None
         self._resized = False
         # True after the prefix key was pressed, while waiting for the command
-        # letter (the next byte selects the relai command).
+        # letter (the next byte selects the ludvart command).
         self._awaiting_command = False
         # AI panel state. ``_panel`` is non-None only while the split is open;
         # ``_panel_messages`` keeps the transcript alive across toggles.
@@ -306,7 +306,7 @@ class Relai:
         # The session summaries from the most recent ``/sessions list``, so
         # ``/sessions load <n>`` can resolve a 1-based index to a session id.
         self._session_list: list[dict] = []
-        # External MCP servers (~/.relai/mcp.json). Created lazily on first panel
+        # External MCP servers (~/.ludvart/mcp.json). Created lazily on first panel
         # open; ``_mcp_started`` guards the one-off automatic discovery.
         self._mcp: McpManager | None = None
         self._mcp_started = False
@@ -314,7 +314,7 @@ class Relai:
         rows, cols = _get_winsize(self._stdout_fd)
         # pyte keeps a live model of what the child has drawn on screen, plus a
         # scrollback of normal-buffer output that scrolled off the top.
-        self.screen = RelaiScreen(cols, rows)
+        self.screen = LudvartScreen(cols, rows)
         self.stream = pyte.ByteStream(self.screen)
         # GNU screen / tmux "set window title" sequences (ESC k <text> ST) are
         # not understood by pyte, which then prints the title text into the
@@ -326,11 +326,11 @@ class Relai:
         self._title_carry = b""
 
         # Optional raw-output capture for diagnosing display glitches. When
-        # ``RELAI_CAPTURE`` names a path, every byte read from the child (plus
-        # markers for events relai injects, such as the resize on panel open) is
+        # ``LUDVART_CAPTURE`` names a path, every byte read from the child (plus
+        # markers for events ludvart injects, such as the resize on panel open) is
         # appended there verbatim so the exact escape sequences can be replayed.
         self._capture_fd: int | None = None
-        cap = os.environ.get("RELAI_CAPTURE")
+        cap = os.environ.get("LUDVART_CAPTURE")
         if cap:
             try:
                 self._capture_fd = os.open(
@@ -350,7 +350,7 @@ class Relai:
             try:
                 os.execvp(self.command[0], self.command)
             except OSError as exc:
-                sys.stderr.write(f"relai: cannot run {self.command[0]!r}: {exc}\n")
+                sys.stderr.write(f"ludvart: cannot run {self.command[0]!r}: {exc}\n")
                 os._exit(127)
 
         # Parent process.
@@ -491,7 +491,7 @@ class Relai:
     # -- input handling / prefix commands -----------------------------------
 
     def _handle_input(self, data: bytes) -> None:
-        """Forward human input to the child, intercepting relai prefix commands.
+        """Forward human input to the child, intercepting ludvart prefix commands.
 
         Input is processed one byte at a time so the prefix key and its
         following command letter are recognized even when they arrive in the
@@ -541,7 +541,7 @@ class Relai:
                 return (
                     "No LLM provider is configured. Set the "
                     "{OPENAI,ANTHROPIC,GOOGLE,CUSTOM}_API_URL/_API_KEY/_MODEL "
-                    "environment variables and restart relai."
+                    "environment variables and restart ludvart."
                 )
 
             return ask, "no LLM"
@@ -553,8 +553,8 @@ class Relai:
         """Open the AI panel as a bottom split and run it until it is closed.
 
         The application is resized to the region above the panel (it just sees a
-        smaller terminal, via SIGWINCH) and relai switches from passthrough to
-        compositing: the child draws into the pyte model, which relai renders
+        smaller terminal, via SIGWINCH) and ludvart switches from passthrough to
+        compositing: the child draws into the pyte model, which ludvart renders
         onto the top region while owning the panel rows below.
         """
         rows, cols = _get_winsize(self._stdout_fd)
@@ -601,7 +601,7 @@ class Relai:
 
         Runs on the panel spinner (via :meth:`_start_action`) so a slow or
         unreachable server never blocks the UI; the result is shown as a system
-        line. Does nothing when there is no ``~/.relai/mcp.json``.
+        line. Does nothing when there is no ``~/.ludvart/mcp.json``.
         """
         if self._mcp_started:
             return
@@ -957,7 +957,7 @@ class Relai:
             panel.add_system(f"  {usage.ljust(width)}  {desc}")
 
     def _cmd_init_helpers(self) -> None:
-        """Handle ``/init_helpers``: install or repair ~/.relai/bin/relai_helper.
+        """Handle ``/init_helpers``: install or repair ~/.ludvart/bin/ludvart_helper.
 
         This is deterministic and does NOT involve the LLM. The harness ships the
         canonical helper source and injects one self-contained shell command that
@@ -979,8 +979,8 @@ class Relai:
 
         self._start_action(
             worker,
-            info=f"Installing/verifying relai_helper v{RELAI_HELPER_VERSION}\u2026",
-            activity="Installing relai_helper",
+            info=f"Installing/verifying ludvart_helper v{LUDVART_HELPER_VERSION}\u2026",
+            activity="Installing ludvart_helper",
         )
 
     def _cmd_compact(self) -> None:
@@ -1027,7 +1027,7 @@ class Relai:
             self._mcp_started = True
         if not self._mcp.config_exists():
             panel.add_system(
-                "No MCP config found. Create ~/.relai/mcp.json with a "
+                "No MCP config found. Create ~/.ludvart/mcp.json with a "
                 '"servers" map (VS Code format) to add MCP servers.'
             )
             return
@@ -1045,34 +1045,34 @@ class Relai:
     def _parse_helper_init(snapshot: str) -> str:
         """Turn the helper install command's output line into a status message.
 
-        Looks for the ``RELAI_HELPER_INIT status=... version=... ok=... reason=...``
+        Looks for the ``LUDVART_HELPER_INIT status=... version=... ok=... reason=...``
         line the injected command prints. The ``status`` value is constrained to
         real words so the echoed command template (which contains ``status=%s``)
         is not mistaken for the result.
         """
         m = re.search(
-            r"RELAI_HELPER_INIT status=(installed|current) version=(\S+) "
+            r"LUDVART_HELPER_INIT status=(installed|current) version=(\S+) "
             r"ok=([01]) reason=(\w+)",
             snapshot,
         )
         if m is None:
             return (
-                "Could not confirm relai_helper install -- no result seen. Make "
+                "Could not confirm ludvart_helper install -- no result seen. Make "
                 "sure the foreground is an interactive shell, then run "
                 "/init_helpers again."
             )
         status, ver, ok, reason = m.groups()
         if ok != "1":
             return (
-                f"relai_helper install FAILED (reason={reason}); the file on disk "
+                f"ludvart_helper install FAILED (reason={reason}); the file on disk "
                 "does not match the expected checksum."
             )
         if status == "current":
-            return f"relai_helper is already up to date (v{ver}, checksum verified)."
+            return f"ludvart_helper is already up to date (v{ver}, checksum verified)."
         if reason == "missing":
-            return f"relai_helper v{ver} installed (was not present)."
+            return f"ludvart_helper v{ver} installed (was not present)."
         return (
-            f"relai_helper v{ver} reinstalled "
+            f"ludvart_helper v{ver} reinstalled "
             "(previous copy was outdated or modified)."
         )
 
@@ -1160,8 +1160,8 @@ class Relai:
         def worker() -> None:
             try:
                 result = ask(question)
-            except Exception as exc:  # surfaced to the user, never crashes relai
-                result = f"[relai] request failed: {exc}"
+            except Exception as exc:  # surfaced to the user, never crashes ludvart
+                result = f"[ludvart] request failed: {exc}"
             self._ask_result = result
             self._ask_done.set()
 
@@ -1192,8 +1192,8 @@ class Relai:
         def run() -> None:
             try:
                 result = worker()
-            except Exception as exc:  # surfaced to the user, never crashes relai
-                result = f"[relai] action failed: {exc}"
+            except Exception as exc:  # surfaced to the user, never crashes ludvart
+                result = f"[ludvart] action failed: {exc}"
             self._ask_result = result
             self._ask_done.set()
 
@@ -1298,7 +1298,7 @@ class Relai:
             )
         except Exception as exc:  # never crash the ask; just skip compaction
             if self._panel is not None:
-                self._panel.add_info(f"[relai] context compaction failed: {exc}")
+                self._panel.add_info(f"[ludvart] context compaction failed: {exc}")
             return None
         return (turn.text or "").strip() or None
 
@@ -1337,7 +1337,7 @@ class Relai:
         appended, so the model sees the entire prior conversation and every
         screen it was shown.
 
-        The model may also request tool calls (see :meth:`_llm_tools`). relai runs
+        The model may also request tool calls (see :meth:`_llm_tools`). ludvart runs
         an agent loop: it executes each requested tool, appends a tool_result to
         the history, and asks again -- exactly the assistant/tool_use ->
         tool_result -> assistant round-tripping a tool-using client performs --
@@ -1354,7 +1354,7 @@ class Relai:
         tools = self._llm_tools()
 
         # Surface automatic retries (timeouts, rate limits, ...) in the panel so
-        # the user can see relai is waiting rather than hung.
+        # the user can see ludvart is waiting rather than hung.
         panel = self._panel
         if panel is not None:
             def _on_retry(note: str) -> None:
@@ -1452,7 +1452,7 @@ class Relai:
             f"  - {t.name}: {t.description}" for t in self._llm_tools()
         )
         return (
-            "You are relai, an assistant embedded in a terminal. The user can ask "
+            "You are ludvart, an assistant embedded in a terminal. The user can ask "
             "you questions across multiple turns. Each user message contains a "
             "<screenContext> block with a snapshot of what is currently on the "
             "terminal (the screen may change between turns) followed by the actual "
@@ -1481,35 +1481,35 @@ class Relai:
             "box-drawing glyphs or emoji -- terminals that cannot render them "
             "show a '?' instead. Use '-' for bullets and dashes, straight ' and "
             "\" quotes, and '->' for arrows.\n\n"
-            "When helper tools under ~/.relai/bin/ are available (check with "
-            "'ls ~/.relai/bin/' and 'relai_helper info' early in a session), "
+            "When helper tools under ~/.ludvart/bin/ are available (check with "
+            "'ls ~/.ludvart/bin/' and 'ludvart_helper info' early in a session), "
             "PREFER them for reading, editing, and searching files -- e.g. "
-            "'relai_helper read', 'replace', 'search'. They pass content as "
+            "'ludvart_helper read', 'replace', 'search'. They pass content as "
             "base64 and return a sentinel-framed exit code, which eliminates "
             "the shell/escape/quoting corruption that ad-hoc 'python3 -c' or "
             "heredoc edits suffer from. Do NOT hand-roll multi-layer quoted "
             "scripts to edit a file when a helper can do it in one call. Use the "
             "native 'b64_encode'/'b64_decode' tools to build the base64 payloads "
-            "for relai_helper and to read its base64 result frames, instead of "
+            "for ludvart_helper and to read its base64 result frames, instead of "
             "'printf | base64' / 'base64 -d' in the shell.\n\n"
-            "(relai_helper v0.2.0+ adds safer edits: 'replace --expect-count N' "
+            "(ludvart_helper v0.2.0+ adds safer edits: 'replace --expect-count N' "
             "fails without writing if the match count differs; '--dry-run' on "
             "replace/write returns a unified diff instead of writing; "
             "'replace-range --start N --end M --b64 DATA' swaps a line range; "
-            "writes auto-save a .relai.bak, and a .py edit that breaks syntax "
+            "writes auto-save a .ludvart.bak, and a .py edit that breaks syntax "
             "returns exit=4 (error=py_syntax) so failures are explicit.)\n\n"
-            + RELAI_HELPERS_DOC
+            + LUDVART_HELPERS_DOC
             + self._load_self_md()
         )
 
     def _load_self_md(self) -> str:
-        """Load persistent self-notes from ~/.relai/SELF.md if present.
+        """Load persistent self-notes from ~/.ludvart/SELF.md if present.
 
         Returns "" when the file is missing, unreadable, or empty, so the
         system-prompt builder never breaks. The content is length-capped and
         prefixed with a header before being appended to the prompt.
         """
-        path = os.path.expanduser("~/.relai/SELF.md")
+        path = os.path.expanduser("~/.ludvart/SELF.md")
         try:
             with open(path, "r", encoding="utf-8") as f:
                 data = f.read()
@@ -1518,7 +1518,7 @@ class Relai:
         data = data[:8192]
         if not data.strip():
             return ""
-        return "\n\n## Persistent self-notes (from ~/.relai/SELF.md)\n" + data
+        return "\n\n## Persistent self-notes (from ~/.ludvart/SELF.md)\n" + data
 
     def _llm_tools(self) -> list[ToolSpec]:
         """Tools advertised to the model for this session."""
@@ -1531,7 +1531,7 @@ class Relai:
         return self._mcp.tool_specs()
 
     def _builtin_tools(self) -> list[ToolSpec]:
-        """relai's own, always-available tools."""
+        """ludvart's own, always-available tools."""
         return [
             ToolSpec(
                 name="inject_input",
@@ -1631,7 +1631,7 @@ class Relai:
                 description=(
                     "Encode UTF-8 text to base64 natively (no shell, no "
                     "terminal round-trip). Use this to build the base64 "
-                    "payloads that relai_helper subcommands expect (e.g. "
+                    "payloads that ludvart_helper subcommands expect (e.g. "
                     "--b64 / --old-b64 / --new-b64), avoiding fragile "
                     "'printf | base64' shell quoting. Returns the base64 string."
                 ),
@@ -1651,7 +1651,7 @@ class Relai:
                 description=(
                     "Decode a base64 string to UTF-8 text natively (no shell). "
                     "Use this to read base64 payloads returned inside "
-                    "relai_helper's RELAI:BEGIN/END result frames without piping "
+                    "ludvart_helper's LUDVART:BEGIN/END result frames without piping "
                     "through 'base64 -d' on screen. Returns the decoded text."
                 ),
                 input_schema={
@@ -1699,27 +1699,27 @@ class Relai:
             if self._panel is not None:
                 self._panel.activity = f"Calling {call.name}"
             return self._mcp.call_tool(call.name, call.input)
-        return f"[relai] unknown tool: {call.name}"
+        return f"[ludvart] unknown tool: {call.name}"
 
     def _tool_b64_encode(self, args: dict) -> str:
         """Base64-encode text natively (no shell/PTY round-trip)."""
         text = args.get("text")
         if not isinstance(text, str):
-            return "[relai] b64_encode: 'text' must be a string"
+            return "[ludvart] b64_encode: 'text' must be a string"
         return base64.b64encode(text.encode("utf-8")).decode("ascii")
 
     def _tool_b64_decode(self, args: dict) -> str:
         """Base64-decode a string to UTF-8 text natively (no shell)."""
         data = args.get("b64")
         if not isinstance(data, str):
-            return "[relai] b64_decode: 'b64' must be a string"
+            return "[ludvart] b64_decode: 'b64' must be a string"
         try:
             return base64.b64decode(data, validate=True).decode("utf-8", "replace")
         except Exception as exc:
-            return f"[relai] b64_decode: invalid base64: {exc}"
+            return f"[ludvart] b64_decode: invalid base64: {exc}"
 
     def _tool_inject_input(self, args: dict) -> str:
-        """Inject keystrokes into the child PTY (relai performs the tool call).
+        """Inject keystrokes into the child PTY (ludvart performs the tool call).
 
         Control keys cannot survive as raw bytes in the model's JSON tool
         arguments, so ``text`` is decoded for backslash escapes by default
@@ -1728,7 +1728,7 @@ class Relai:
         ``interpret_escapes=false`` to send the text verbatim.
 
         After injecting, the command's output is not available immediately and we
-        cannot know when it finishes. relai learns the prompt from the cursor
+        cannot know when it finishes. ludvart learns the prompt from the cursor
         line captured just before injection and watches the screen model: when
         that prompt returns (any shell/REPL), or output goes quiet, the input is
         settled. Only an ambiguous quiet screen with no recognizable prompt
@@ -1739,7 +1739,7 @@ class Relai:
         """
         text = args.get("text", "")
         if not isinstance(text, str):
-            return "[relai] inject_input: 'text' must be a string."
+            return "[ludvart] inject_input: 'text' must be a string."
         if args.get("interpret_escapes", True):
             data = self._decode_escapes(text)
         else:
@@ -1747,12 +1747,12 @@ class Relai:
         if args.get("submit"):
             data += b"\r"
         if not data:
-            return "[relai] inject_input: nothing to inject (empty 'text')."
+            return "[ludvart] inject_input: nothing to inject (empty 'text')."
         prompt_prefix = self._current_prompt_prefix()
         try:
             self._write_all(self._master_fd, data)
         except OSError as exc:
-            return f"[relai] inject_input failed: {exc}"
+            return f"[ludvart] inject_input failed: {exc}"
         snapshot = self._wait_for_injection_to_settle(text, prompt_prefix)
         return (
             f"Injected {len(data)} byte(s) into the terminal. The input was sent "
@@ -2003,12 +2003,12 @@ class Relai:
             length = int(args.get("length"))
         except (TypeError, ValueError):
             return (
-                "[relai] capture_screen_history: 'offset' and 'length' must be "
+                "[ludvart] capture_screen_history: 'offset' and 'length' must be "
                 "integers."
             )
         if length <= 0:
             return (
-                "[relai] capture_screen_history: 'length' must be a positive "
+                "[ludvart] capture_screen_history: 'length' must be a positive "
                 "integer."
             )
         # Read the full logical history; retry briefly in case the main thread
@@ -2022,7 +2022,7 @@ class Relai:
                 time.sleep(0.02)
         if full is None:
             return (
-                "[relai] capture_screen_history: could not read the screen "
+                "[ludvart] capture_screen_history: could not read the screen "
                 "history, please try again."
             )
         total = len(full)
@@ -2031,7 +2031,7 @@ class Relai:
         lines = full[start:end]
         if not lines:
             return (
-                "[relai] capture_screen_history: the requested range is empty "
+                "[ludvart] capture_screen_history: the requested range is empty "
                 f"(offset={offset}, length={length}). The history currently has "
                 f"{total} line(s); use a negative offset no smaller than "
                 f"-{total}."
@@ -2102,14 +2102,14 @@ class Relai:
     def _capture(self, data: bytes = b"", marker: bytes | None = None) -> None:
         """Append raw child output (or an event ``marker``) to the capture file.
 
-        No-op unless ``RELAI_CAPTURE`` was set. Markers are wrapped so they are
+        No-op unless ``LUDVART_CAPTURE`` was set. Markers are wrapped so they are
         visibly distinct from real child bytes when the file is inspected.
         """
         if self._capture_fd is None:
             return
         try:
             if marker is not None:
-                os.write(self._capture_fd, b"\n<<relai:" + marker + b">>\n")
+                os.write(self._capture_fd, b"\n<<ludvart:" + marker + b">>\n")
             else:
                 os.write(self._capture_fd, data)
         except OSError:

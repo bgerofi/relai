@@ -4,16 +4,16 @@ Verifies that a failed provider request is reported with the exception type, the
 elapsed time versus the configured timeout, any HTTP status / request-id the SDK
 exposes, and the underlying cause of the exception chain. Also covers the retry
 runner (transient failures retried and reported) and settings resolution from
-env / ~/.relai/llm.conf.
+env / ~/.ludvart/llm.conf.
 
 Run:
-    cd /local_home/bgerofi1/src/relai && source .venv/bin/activate \
+    cd /local_home/bgerofi1/src/ludvart && source .venv/bin/activate \
         && python tools/test_llm_error_detail.py
 """
 
 import os
 
-from relai.llm import (
+from ludvart.llm import (
     DEFAULT_MAX_RETRIES,
     DEFAULT_TIMEOUT,
     LLMClient,
@@ -116,7 +116,7 @@ def test_request_retries_then_succeeds():
         return "ok"
 
     # Avoid real backoff sleeps.
-    import relai.llm as llm
+    import ludvart.llm as llm
 
     saved_sleep = llm.time.sleep
     llm.time.sleep = lambda _s: None
@@ -133,7 +133,7 @@ def test_request_retries_then_succeeds():
 def test_request_gives_up_after_retries():
     c = _client(max_retries=1)
 
-    import relai.llm as llm
+    import ludvart.llm as llm
 
     saved_sleep = llm.time.sleep
     llm.time.sleep = lambda _s: None
@@ -165,21 +165,21 @@ def test_request_non_retryable_raises_immediately():
 
 
 def test_resolve_settings():
-    for var in ("RELAI_LLM_TIMEOUT", "RELAI_LLM_MAX_RETRIES"):
+    for var in ("LUDVART_LLM_TIMEOUT", "LUDVART_LLM_MAX_RETRIES"):
         os.environ.pop(var, None)
     assert _resolve_settings({}) == (DEFAULT_TIMEOUT, DEFAULT_MAX_RETRIES)
     # File values used as fallback.
     assert _resolve_settings(
-        {"RELAI_LLM_TIMEOUT": "120", "RELAI_LLM_MAX_RETRIES": "5"}
+        {"LUDVART_LLM_TIMEOUT": "120", "LUDVART_LLM_MAX_RETRIES": "5"}
     ) == (120.0, 5)
     # Env overrides file; junk falls back to defaults.
-    os.environ["RELAI_LLM_TIMEOUT"] = "90"
+    os.environ["LUDVART_LLM_TIMEOUT"] = "90"
     try:
         timeout, retries = _resolve_settings(
-            {"RELAI_LLM_TIMEOUT": "120", "RELAI_LLM_MAX_RETRIES": "junk"}
+            {"LUDVART_LLM_TIMEOUT": "120", "LUDVART_LLM_MAX_RETRIES": "junk"}
         )
     finally:
-        del os.environ["RELAI_LLM_TIMEOUT"]
+        del os.environ["LUDVART_LLM_TIMEOUT"]
     assert timeout == 90.0
     assert retries == DEFAULT_MAX_RETRIES
 
@@ -278,7 +278,7 @@ def test_request_honors_retry_after_and_reports_rate_limit():
             raise _RateLimit("too many requests")
         return "ok"
 
-    import relai.llm as llm
+    import ludvart.llm as llm
 
     slept = []
     saved_sleep = llm.time.sleep

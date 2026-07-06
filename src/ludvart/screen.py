@@ -1,7 +1,7 @@
 """Screen model with normal/alternate buffer tracking.
 
-``RelaiScreen`` extends :class:`pyte.HistoryScreen` so that, in addition to the
-live viewport, relai keeps a *scrollback* of logical output that scrolled off
+``LudvartScreen`` extends :class:`pyte.HistoryScreen` so that, in addition to the
+live viewport, ludvart keeps a *scrollback* of logical output that scrolled off
 the top of the normal screen buffer.
 
 The key behaviour is distinguishing the two terminal screen buffers:
@@ -39,7 +39,7 @@ def _row_to_text(row) -> str:
     return "".join(row[col].data for col in sorted(row)).rstrip()
 
 
-class RelaiScreen(pyte.HistoryScreen):
+class LudvartScreen(pyte.HistoryScreen):
     """A pyte screen that tracks the alternate buffer and keeps clean scrollback.
 
     Attributes

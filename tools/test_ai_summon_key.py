@@ -24,7 +24,7 @@ def pump(fd, stream, seconds):
 
 def panel_open(screen):
     text = "\n".join(screen.display)
-    return "relai>" in text or "^O/Esc:close" in text
+    return "ludvart>" in text or "^O/Esc:close" in text
 
 
 def main():
@@ -32,7 +32,7 @@ def main():
     if pid == 0:
         os.environ["PS1"] = "$ "
         os.environ["TERM"] = "xterm"
-        os.execvp("relai", ["relai", "--", "bash", "--norc", "-i"])
+        os.execvp("ludvart", ["ludvart", "--", "bash", "--norc", "-i"])
     fcntl.ioctl(m, termios.TIOCSWINSZ, struct.pack("HHHH", ROWS, COLS, 0, 0))
     screen = pyte.Screen(COLS, ROWS)
     stream = pyte.ByteStream(screen)

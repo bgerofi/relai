@@ -5,11 +5,11 @@ VER = "0.2.2"
 CAPS = "read,write,append,replace,replace-range,search,run,info"
 
 def emit(op, payload_bytes=None, code=0, **meta):
-    sys.stdout.write("<<<RELAI:BEGIN op=%s>>>\n" % op)
+    sys.stdout.write("<<<LUDVART:BEGIN op=%s>>>\n" % op)
     if payload_bytes is not None:
         sys.stdout.write(base64.b64encode(payload_bytes).decode() + "\n")
     metastr = "".join(" %s=%s" % (k, v) for k, v in meta.items())
-    sys.stdout.write("<<<RELAI:END op=%s exit=%d%s>>>\n" % (op, code, metastr))
+    sys.stdout.write("<<<LUDVART:END op=%s exit=%d%s>>>\n" % (op, code, metastr))
     sys.stdout.flush()
     return code
 
@@ -18,7 +18,7 @@ def _backup(path):
         if os.path.isfile(path):
             with open(path, "rb") as f:
                 data = f.read()
-            with open(path + ".relai.bak", "wb") as f:
+            with open(path + ".ludvart.bak", "wb") as f:
                 f.write(data)
     except (IOError, OSError):
         pass
@@ -54,7 +54,7 @@ def _save(op, path, ndata, dry, **meta):
         if pc == "FAILED":
             code = 4
             meta["error"] = "py_syntax"
-            meta["backup"] = path + ".relai.bak"
+            meta["backup"] = path + ".ludvart.bak"
     return emit(op, None, code, path=path, **meta)
 
 def op_read(a):
@@ -149,11 +149,11 @@ def op_run(a):
     return emit("run", out, pr.returncode)
 
 def op_info(a):
-    txt = "relai_helper %s\ncaps=%s\npython=%s" % (VER, CAPS, sys.version.split()[0])
+    txt = "ludvart_helper %s\ncaps=%s\npython=%s" % (VER, CAPS, sys.version.split()[0])
     return emit("info", txt.encode(), 0)
 
 def main():
-    p = argparse.ArgumentParser(prog="relai_helper")
+    p = argparse.ArgumentParser(prog="ludvart_helper")
     # NOTE: the required= keyword for subparsers needs Python 3.7+, so we leave
     # the subcommand optional here and enforce that one was chosen manually
     # below. This keeps the helper working on any Python 3.2+ (some hosts still

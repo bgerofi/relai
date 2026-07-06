@@ -1,5 +1,5 @@
 """End-to-end: open the AI panel, verify bracketed paste and cursor editing land
-in the prompt correctly through the real relai binary.
+in the prompt correctly through the real ludvart binary.
 
 Drives a real PTY:
   1. Open the panel (Ctrl-O).
@@ -7,10 +7,10 @@ Drives a real PTY:
   3. Bracketed-paste " PASTED\ntext" -> newline folds to a space, no submit.
   4. Move the cursor left and insert a char mid-line.
   5. Home + Ctrl-K erases everything.
-Renders relai's output through pyte and checks the "relai> " input line.
+Renders ludvart's output through pyte and checks the "ludvart> " input line.
 
 Run:
-    cd /local_home/bgerofi1/src/relai && source .venv/bin/activate \
+    cd /local_home/bgerofi1/src/ludvart && source .venv/bin/activate \
         && python tools/test_ai_paste_e2e.py
 """
 
@@ -39,9 +39,9 @@ def pump(fd, stream, seconds):
 
 
 def input_line(screen):
-    """Return the panel input row (the one starting with 'relai> ')."""
+    """Return the panel input row (the one starting with 'ludvart> ')."""
     for row in screen.display:
-        if "relai>" in row:
+        if "ludvart>" in row:
             return row.rstrip()
     return ""
 
@@ -51,7 +51,7 @@ def main():
     if pid == 0:
         os.environ["PS1"] = "$ "
         os.environ["TERM"] = "xterm"
-        os.execvp("relai", ["relai", "--", "bash", "--norc", "-i"])
+        os.execvp("ludvart", ["ludvart", "--", "bash", "--norc", "-i"])
     fcntl.ioctl(m, termios.TIOCSWINSZ, struct.pack("HHHH", ROWS, COLS, 0, 0))
     screen = pyte.Screen(COLS, ROWS)
     stream = pyte.ByteStream(screen)
@@ -92,7 +92,7 @@ def main():
     os.write(m, b"\x0b")     # Ctrl-K kill-to-end
     pump(m, stream, 1)
     line = input_line(screen)
-    ok = line.strip() == "relai>"
+    ok = line.strip() == "ludvart>"
     results.append(("kill", ok, line))
 
     print("== e2e paste/edit ==")

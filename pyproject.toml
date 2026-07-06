@@ -1,5 +1,5 @@
 [project]
-name = "relai"
+name = "ludvart"
 version = "0.0.1"
 description = "PTY-level character-stream relay with an optional, human-in-control AI agent."
 readme = "README.md"
@@ -13,11 +13,11 @@ dependencies = [
 ]
 
 [project.scripts]
-relai = "relai.__main__:main"
+ludvart = "ludvart.__main__:main"
 
 [build-system]
 requires = ["hatchling"]
 build-backend = "hatchling.build"
 
 [tool.hatch.build.targets.wheel]
-packages = ["src/relai"]
+packages = ["src/ludvart"]

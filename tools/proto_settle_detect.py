@@ -25,7 +25,7 @@ import time
 
 import pyte
 
-from relai.llm import create_client, LLMNotConfigured
+from ludvart.llm import create_client, LLMNotConfigured
 
 ROWS, COLS = 24, 100
 
@@ -86,7 +86,7 @@ def settle_to_prompt(fd, stream, screen):
 
 
 # --------------------------------------------------------------------------- #
-# LLM status check (identical wording to relai._injection_finished)
+# LLM status check (identical wording to ludvart._injection_finished)
 # --------------------------------------------------------------------------- #
 def llm_done(llm, injected, text):
     system = {

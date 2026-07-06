@@ -1,6 +1,6 @@
 """External MCP (Model Context Protocol) server support.
 
-relai reads server definitions from ``~/.relai/mcp.json`` -- the same shape as
+ludvart reads server definitions from ``~/.ludvart/mcp.json`` -- the same shape as
 VS Code's ``mcp.json`` (a top-level ``"servers"`` map; the Claude-Desktop
 ``"mcpServers"`` key is also accepted) -- and exposes every server's tools to
 the LLM as ordinary function-calling tools. Both transports are supported via
@@ -12,14 +12,14 @@ the official ``mcp`` SDK:
 
 Discovery
 ---------
-An MCP server does not describe its tools up front: relai must connect, run the
+An MCP server does not describe its tools up front: ludvart must connect, run the
 ``initialize`` handshake and then ``tools/list`` to learn the tool API. That is
 the discovery step; it happens automatically the first time the panel opens and
 can be forced again with the ``/mcp_refresh`` command.
 
 Threading model
 ---------------
-relai's core is synchronous (a PTY select loop, with LLM calls on a worker
+ludvart's core is synchronous (a PTY select loop, with LLM calls on a worker
 thread) while the MCP SDK is asyncio-based, so all MCP I/O runs on a single
 background event-loop thread. Synchronous callers submit coroutines to that loop
 and block on the result. Each server is driven by its own long-lived worker
@@ -65,18 +65,18 @@ def available() -> bool:
 
 
 def config_path() -> str:
-    """Path of the MCP config file (``~/.relai/mcp.json``)."""
-    return os.path.join(os.path.expanduser("~"), ".relai", "mcp.json")
+    """Path of the MCP config file (``~/.ludvart/mcp.json``)."""
+    return os.path.join(os.path.expanduser("~"), ".ludvart", "mcp.json")
 
 
 def _stderr_sink():
     """Return a writable text stream for a stdio server's stderr.
 
-    Uses ``RELAI_MCP_LOG`` (append) when set so server diagnostics can be
-    inspected; otherwise discards them. Never the real terminal, which relai
+    Uses ``LUDVART_MCP_LOG`` (append) when set so server diagnostics can be
+    inspected; otherwise discards them. Never the real terminal, which ludvart
     composites and must keep byte-exact.
     """
-    log = os.environ.get("RELAI_MCP_LOG")
+    log = os.environ.get("LUDVART_MCP_LOG")
     target = log if log else os.devnull
     try:
         return open(target, "a", encoding="utf-8", errors="replace")
@@ -197,7 +197,7 @@ class McpStatus:
     def report(self) -> str:
         """A multi-line, ASCII status summary for the panel."""
         if not self.servers:
-            return "No MCP servers configured in ~/.relai/mcp.json."
+            return "No MCP servers configured in ~/.ludvart/mcp.json."
         ok = sum(1 for c, e in self.servers.values() if e is None)
         head = (
             f"MCP: {ok}/{len(self.servers)} server(s) connected, "
@@ -215,7 +215,7 @@ class McpStatus:
 class McpManager:
     """Connects to configured MCP servers and exposes their tools.
 
-    Thread-safe: public methods may be called from relai's worker threads; all
+    Thread-safe: public methods may be called from ludvart's worker threads; all
     MCP I/O is marshalled onto one private event-loop thread.
     """
 
@@ -268,10 +268,10 @@ class McpManager:
             entry = self._tools.get(public_name)
             server = self._servers.get(entry.server) if entry else None
         if entry is None:
-            return f"[relai] unknown MCP tool: {public_name}"
+            return f"[ludvart] unknown MCP tool: {public_name}"
         if server is None or server.task is None or server.task.done():
             return (
-                f"[relai] MCP server '{entry.server}' is not connected; "
+                f"[ludvart] MCP server '{entry.server}' is not connected; "
                 "run /mcp_refresh"
             )
         try:
@@ -281,11 +281,11 @@ class McpManager:
             )
         except concurrent.futures.TimeoutError:
             return (
-                f"[relai] MCP tool '{public_name}' timed out after "
+                f"[ludvart] MCP tool '{public_name}' timed out after "
                 f"{self._call_timeout:.0f}s"
             )
         except Exception as exc:  # noqa: BLE001 - reported to the model
-            return f"[relai] MCP tool '{public_name}' failed: {exc}"
+            return f"[ludvart] MCP tool '{public_name}' failed: {exc}"
         return _result_to_text(result)
 
     def close(self) -> None:
@@ -309,7 +309,7 @@ class McpManager:
             return
         self._loop = asyncio.new_event_loop()
         self._thread = threading.Thread(
-            target=self._run_loop, name="relai-mcp", daemon=True
+            target=self._run_loop, name="ludvart-mcp", daemon=True
         )
         self._thread.start()
 
@@ -429,9 +429,9 @@ class McpManager:
                 env={**os.environ, **overrides},
                 cwd=_expand(str(cfg["cwd"])) if cfg.get("cwd") else None,
             )
-            # A stdio server's stderr must NOT reach the real terminal: relai
+            # A stdio server's stderr must NOT reach the real terminal: ludvart
             # composites the screen from a pyte model, so stray bytes there
-            # corrupt the display. Route it to RELAI_MCP_LOG if set, else drop it.
+            # corrupt the display. Route it to LUDVART_MCP_LOG if set, else drop it.
             errlog = stack.enter_context(_stderr_sink())
             read, write = await stack.enter_async_context(
                 stdio_client(params, errlog=errlog)

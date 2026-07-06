@@ -1,7 +1,7 @@
-"""Drive relai through a PTY to test the Ctrl-G a AI panel end-to-end.
+"""Drive ludvart through a PTY to test the Ctrl-G a AI panel end-to-end.
 
 Uses select() with timeouts and an overall wall-clock cap so it can never hang.
-Prints a transcript tail of what relai rendered, then a PASS/FAIL summary.
+Prints a transcript tail of what ludvart rendered, then a PASS/FAIL summary.
 """
 
 import errno
@@ -38,7 +38,7 @@ def drain(fd, seconds):
 
 
 def main():
-    argv = ["relai", "--", "bash", "--norc", "-i"]
+    argv = ["ludvart", "--", "bash", "--norc", "-i"]
     pid, master = pty.fork()
     if pid == 0:
         os.environ["PS1"] = "$ "
@@ -56,7 +56,7 @@ def main():
         transcript.extend(drain(master, wait))
 
     try:
-        transcript.extend(drain(master, 8.0))          # relai + bash start
+        transcript.extend(drain(master, 8.0))          # ludvart + bash start
         send(b"echo HELLO_FROM_SCREEN_42\n", 1.0)      # screen content
         send(b"\x07", 0.3)                             # Ctrl-G
         send(b"a", 0.8)                                # AI panel
@@ -82,9 +82,9 @@ def main():
     sys.stdout.write("\n===== SUMMARY =====\n")
     after_answer = text.split("Q: What number")[-1] if "Q: What number" in text else ""
     checks = {
-        "panel prompt shown": "Ask relai:" in text,
+        "panel prompt shown": "Ask ludvart:" in text,
         "thinking indicator": "Thinking" in text,
-        "answer view opened": "relai answer" in text,
+        "answer view opened": "ludvart answer" in text,
         "answer mentions 42": "42" in after_answer,
     }
     for k, v in checks.items():

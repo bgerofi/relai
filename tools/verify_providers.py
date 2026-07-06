@@ -1,6 +1,6 @@
 """Live end-to-end provider verification.
 
-Given one or more ``~/.relai/llm.conf*`` files, for each: resolve the provider,
+Given one or more ``~/.ludvart/llm.conf*`` files, for each: resolve the provider,
 build the client (spawning the local LiteLLM gateway for Copilot), then exercise
 the full agentic path the AI panel uses:
 
@@ -20,7 +20,7 @@ from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1] / "src"))
 
-from relai import gateway, llm  # noqa: E402
+from ludvart import gateway, llm  # noqa: E402
 
 
 WEATHER = llm.ToolSpec(
@@ -54,7 +54,7 @@ def _build_client(path: str):
         if not gateway.litellm_available():
             raise RuntimeError("litellm gateway not installed")
         if not gateway.copilot_authenticated():
-            raise RuntimeError("Copilot not authenticated (run relai once to log in)")
+            raise RuntimeError("Copilot not authenticated (run ludvart once to log in)")
         gw = gateway.CopilotGateway(model)
         gw.start()
         provider = llm.copilot_provider_config(

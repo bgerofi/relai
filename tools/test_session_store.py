@@ -1,7 +1,7 @@
 """Unit tests for session persistence and slash-command helpers (session.py).
 
 Run:
-    cd /local_home/bgerofi1/src/relai && source .venv/bin/activate \
+    cd /local_home/bgerofi1/src/ludvart && source .venv/bin/activate \
         && python tools/test_session_store.py
 """
 
@@ -10,7 +10,7 @@ import tempfile
 from datetime import datetime, timezone
 from pathlib import Path
 
-from relai.session import (
+from ludvart.session import (
     SessionStore,
     complete_slash,
     list_sessions,
@@ -45,7 +45,7 @@ def test_save_and_reload_roundtrip():
     root = Path(tempfile.mkdtemp())
     when = datetime(2026, 7, 2, 8, 5, 9, tzinfo=timezone.utc)
     store = SessionStore(root=root, started_at=when)
-    messages = [("you", "hi"), ("relai", "hello"), ("info", "note")]
+    messages = [("you", "hi"), ("ludvart", "hello"), ("info", "note")]
     history = [{"role": "user", "content": "hi"},
                {"role": "assistant", "content": "hello"}]
     store.save(messages, history)
@@ -56,7 +56,7 @@ def test_save_and_reload_roundtrip():
     assert data["session_id"] == "2026-07-02/08_05_09"
     assert data["started_at"] == "2026-07-02T08:05:09Z"
     assert data["updated_at"].endswith("Z")
-    assert data["messages"] == [["you", "hi"], ["relai", "hello"], ["info", "note"]]
+    assert data["messages"] == [["you", "hi"], ["ludvart", "hello"], ["info", "note"]]
     assert data["llm_history"] == history
 
     loaded = load_session("2026-07-02/08_05_09", root=root)
@@ -68,9 +68,9 @@ def test_save_extends_same_file():
     root = Path(tempfile.mkdtemp())
     when = datetime(2026, 7, 2, 8, 5, 9, tzinfo=timezone.utc)
     store = SessionStore(root=root, started_at=when)
-    store.save([("you", "q1"), ("relai", "a1")], [{"role": "user", "content": "q1"}])
+    store.save([("you", "q1"), ("ludvart", "a1")], [{"role": "user", "content": "q1"}])
     store.save(
-        [("you", "q1"), ("relai", "a1"), ("you", "q2"), ("relai", "a2")],
+        [("you", "q1"), ("ludvart", "a1"), ("you", "q2"), ("ludvart", "a2")],
         [{"role": "user", "content": "q1"}, {"role": "user", "content": "q2"}],
     )
     # Still one file; it holds the extended conversation.
@@ -78,7 +78,7 @@ def test_save_extends_same_file():
     assert files == [store.path], files
     data = json.loads(store.path.read_text())
     assert len(data["messages"]) == 4
-    assert data["messages"][-1] == ["relai", "a2"]
+    assert data["messages"][-1] == ["ludvart", "a2"]
     print("save extends same file: OK")
 
 
@@ -89,14 +89,14 @@ def test_system_messages_not_persisted():
         ("you", "hi"),
         ("system", "> /sessions list"),
         ("system", "1. 2026.../.."),
-        ("relai", "hello"),
+        ("ludvart", "hello"),
     ]
     store.save(messages, [])
     data = json.loads(store.path.read_text())
     kinds = [m[0] for m in data["messages"]]
-    assert kinds == ["you", "relai"], kinds
+    assert kinds == ["you", "ludvart"], kinds
     # And the pure filter helper agrees.
-    assert persisted_messages(messages) == [("you", "hi"), ("relai", "hello")]
+    assert persisted_messages(messages) == [("you", "hi"), ("ludvart", "hello")]
     print("system messages not persisted: OK")
 
 
@@ -104,7 +104,7 @@ def test_list_sessions_sorted_with_preview():
     root = Path(tempfile.mkdtemp())
     a = SessionStore(root=root, started_at=datetime(2026, 7, 1, 9, 0, 0, tzinfo=timezone.utc))
     b = SessionStore(root=root, started_at=datetime(2026, 7, 2, 9, 0, 0, tzinfo=timezone.utc))
-    a.save([("you", "first question"), ("relai", "ans")], [])
+    a.save([("you", "first question"), ("ludvart", "ans")], [])
     b.save([("info", "note"), ("you", "second question")], [])
 
     listed = list_sessions(root=root)
@@ -125,12 +125,12 @@ def test_list_sessions_empty_and_missing_root():
 def test_open_existing_binds_to_same_file():
     root = Path(tempfile.mkdtemp())
     store = SessionStore(root=root, started_at=datetime(2026, 7, 2, 8, 5, 9, tzinfo=timezone.utc))
-    store.save([("you", "hi"), ("relai", "hello")], [])
+    store.save([("you", "hi"), ("ludvart", "hello")], [])
 
     reopened = SessionStore.open_existing("2026-07-02/08_05_09", root=root)
     assert reopened.path == store.path
     reopened.save(
-        [("you", "hi"), ("relai", "hello"), ("you", "more")], []
+        [("you", "hi"), ("ludvart", "hello"), ("you", "more")], []
     )
     data = json.loads(store.path.read_text())
     assert data["messages"][-1] == ["you", "more"]
@@ -140,15 +140,15 @@ def test_open_existing_binds_to_same_file():
 def test_sessions_root_env_override(monkeypatch=None):
     import os
 
-    old = os.environ.get("RELAI_SESSIONS_DIR")
+    old = os.environ.get("LUDVART_SESSIONS_DIR")
     try:
-        os.environ["RELAI_SESSIONS_DIR"] = "/tmp/relai-test-root"
-        assert sessions_root() == Path("/tmp/relai-test-root")
+        os.environ["LUDVART_SESSIONS_DIR"] = "/tmp/ludvart-test-root"
+        assert sessions_root() == Path("/tmp/ludvart-test-root")
     finally:
         if old is None:
-            os.environ.pop("RELAI_SESSIONS_DIR", None)
+            os.environ.pop("LUDVART_SESSIONS_DIR", None)
         else:
-            os.environ["RELAI_SESSIONS_DIR"] = old
+            os.environ["LUDVART_SESSIONS_DIR"] = old
     print("sessions_root env override: OK")
 
 
