@@ -188,6 +188,42 @@ def test_anthropic_empty_only_turn_gets_filler():
     print("anthropic empty-only turn gets filler: OK")
 
 
+def test_anthropic_sanitizes_stored_whitespace_history():
+    """Replaying an older session with whitespace-only content must be repaired.
+
+    Sessions captured before empty blocks were scrubbed at capture time can hold
+    an assistant turn whose ``content`` is a lone space (as a plain string or a
+    whitespace-only text block). ``_prepare_converse`` must scrub these so the
+    request Anthropic sees never contains empty/whitespace-only text.
+    """
+    client = _anthropic_client()
+    messages = [
+        {"role": "system", "content": "sys"},
+        {"role": "user", "content": "hello"},
+        {"role": "assistant", "content": " "},  # legacy whitespace-only string
+        {"role": "user", "content": "again"},
+        {
+            "role": "assistant",
+            "content": [{"type": "text", "text": "  "}],  # whitespace-only block
+        },
+        {"role": "user", "content": "now"},
+    ]
+    request = client._prepare_converse(messages, tools=None, max_tokens=16)
+
+    # System prompt is pulled out separately; no system turns leak into messages.
+    assert request["system"] == "sys"
+    for msg in request["messages"]:
+        assert msg["role"] != "system"
+        content = msg["content"]
+        if isinstance(content, str):
+            assert content.strip() != "", msg
+        else:
+            for block in content:
+                if block.get("type") == "text":
+                    assert block["text"].strip() != "", block
+    print("anthropic sanitizes stored whitespace history: OK")
+
+
 # -- panel renders the interim line ----------------------------------------
 
 
@@ -298,6 +334,7 @@ def main():
     test_anthropic_non_stream_unchanged()
     test_anthropic_drops_empty_text_block()
     test_anthropic_empty_only_turn_gets_filler()
+    test_anthropic_sanitizes_stored_whitespace_history()
     test_panel_renders_interim_line()
     with tempfile.TemporaryDirectory() as d:
         test_ludvart_streams_and_clears_interim(Path(d))

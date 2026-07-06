@@ -1231,6 +1231,37 @@ class AnthropicClient(LLMClient):
         except (AttributeError, TypeError) as exc:
             raise LLMError(f"unexpected response from {self.name}: {resp!r}") from exc
 
+    @staticmethod
+    def _sanitize_turn(message: Message) -> Message:
+        """Repair a turn so Anthropic accepts it on replay.
+
+        Anthropic rejects any text content block (or a whole message) that is
+        empty or whitespace-only with "text content blocks must contain
+        non-whitespace text". Sessions captured before that was handled at
+        capture time can still hold such content (e.g. an assistant turn whose
+        ``content`` is a lone space), so scrub the history here as a safety net
+        for both plain-string and block-list content.
+        """
+        content = message.get("content")
+        if isinstance(content, str):
+            if content.strip():
+                return message
+            return {**message, "content": "(no content)"}
+        if isinstance(content, list):
+            cleaned: list = []
+            for block in content:
+                if isinstance(block, dict) and block.get("type") == "text":
+                    text = block.get("text", "")
+                    if isinstance(text, str) and not text.strip():
+                        continue
+                cleaned.append(block)
+            if not cleaned:
+                cleaned.append({"type": "text", "text": "(no content)"})
+            if cleaned == content:
+                return message
+            return {**message, "content": cleaned}
+        return message
+
     def _prepare_converse(
         self,
         messages: Sequence[Message],
@@ -1238,7 +1269,11 @@ class AnthropicClient(LLMClient):
         max_tokens: int,
     ) -> Any:
         system_parts = [m["content"] for m in messages if m.get("role") == "system"]
-        turns = [m for m in messages if m.get("role") != "system"]
+        turns = [
+            self._sanitize_turn(m)
+            for m in messages
+            if m.get("role") != "system"
+        ]
         kwargs: dict = {
             "model": self.config.model,
             "max_tokens": max_tokens,
