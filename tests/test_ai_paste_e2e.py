@@ -11,7 +11,7 @@ Renders ludvart's output through pyte and checks the "ludvart> " input line.
 
 Run:
     cd /local_home/bgerofi1/src/ludvart && source .venv/bin/activate \
-        && python tools/test_ai_paste_e2e.py
+        && python tests/test_ai_paste_e2e.py
 """
 
 import errno, fcntl, os, pty, select, struct, termios, time

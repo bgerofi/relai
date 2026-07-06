@@ -14,7 +14,7 @@ Covers:
 
 Run:
     cd /local_home/bgerofi1/src/ludvart && source .venv/bin/activate \
-        && python tools/test_context_compaction.py
+        && python tests/test_context_compaction.py
 """
 
 import json

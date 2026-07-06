@@ -5,7 +5,7 @@ Verifies that provider variables are read from the environment, fall back to a
 
 Run:
     cd /local_home/bgerofi1/src/ludvart && source .venv/bin/activate \
-        && python tools/test_llm_conf.py
+        && python tests/test_llm_conf.py
 """
 
 import os

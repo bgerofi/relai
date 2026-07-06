@@ -63,6 +63,11 @@ def scenario(ps1, label, partial=b""):
         pass
 
 
-scenario("$ ", "SINGLE-LINE PROMPT")
-scenario("[demo]\\n$ ", "TWO-LINE PROMPT")
-scenario("$ ", "SINGLE-LINE + PARTIAL BUFFER 'ls -la'", partial=b"ls -la")
+def main():
+    scenario("$ ", "SINGLE-LINE PROMPT")
+    scenario("[demo]\\n$ ", "TWO-LINE PROMPT")
+    scenario("$ ", "SINGLE-LINE + PARTIAL BUFFER 'ls -la'", partial=b"ls -la")
+
+
+if __name__ == "__main__":
+    main()

@@ -5,7 +5,7 @@ client so the models endpoint can be simulated without network access.
 
 Run:
     cd /local_home/bgerofi1/src/ludvart && source .venv/bin/activate \
-        && python tools/test_context_window_detect.py
+        && python tests/test_context_window_detect.py
 """
 
 import json

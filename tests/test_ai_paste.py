@@ -7,7 +7,7 @@ processed as normal keys.
 
 Run:
     cd /local_home/bgerofi1/src/ludvart && source .venv/bin/activate \
-        && python tools/test_ai_paste.py
+        && python tests/test_ai_paste.py
 """
 
 from ludvart.ludvart import Ludvart, _PASTE_START, _PASTE_END

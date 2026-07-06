@@ -7,7 +7,7 @@ auto-initialization has been removed.
 
 Run:
     cd /local_home/bgerofi1/src/ludvart && source .venv/bin/activate \
-        && python tools/test_ai_init_helpers.py
+        && python tests/test_ai_init_helpers.py
 """
 
 from ludvart.ludvart import Ludvart

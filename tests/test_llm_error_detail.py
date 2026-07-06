@@ -8,7 +8,7 @@ env / ~/.ludvart/llm.conf.
 
 Run:
     cd /local_home/bgerofi1/src/ludvart && source .venv/bin/activate \
-        && python tools/test_llm_error_detail.py
+        && python tests/test_llm_error_detail.py
 """
 
 import os

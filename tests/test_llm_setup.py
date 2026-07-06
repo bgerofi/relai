@@ -7,7 +7,7 @@ through the normal config resolution (``_load_conf`` / ``resolve_config``).
 
 Run:
     cd /local_home/bgerofi1/src/ludvart && source .venv/bin/activate \
-        && python tools/test_llm_setup.py
+        && python tests/test_llm_setup.py
 """
 
 import os

@@ -6,7 +6,7 @@ throwaway HOME installs, then reports "current", then repairs a tampered copy.
 
 Run:
     cd /local_home/bgerofi1/src/ludvart && source .venv/bin/activate \
-        && python tools/test_helper_src.py
+        && python tests/test_helper_src.py
 """
 
 import hashlib

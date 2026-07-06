@@ -43,8 +43,8 @@ fi
 export VIRTUAL_ENV="$PWD/.venv"
 VENV_PY="$VIRTUAL_ENV/bin/python"
 
-echo "==> Installing ludvart (editable) and dependencies"
-uv pip install --python "$VENV_PY" -e .
+echo "==> Installing ludvart (editable) with dev tools (pytest) and dependencies"
+uv pip install --python "$VENV_PY" -e ".[dev]"
 
 echo "==> Installing the LiteLLM gateway (enables the GitHub Copilot endpoint)"
 # Optional feature: ludvart works with the other providers without it, so a
@@ -73,3 +73,6 @@ echo "    source .venv/bin/activate"
 echo "Then run:"
 echo "    ludvart            # spawns your \$SHELL"
 echo "    ludvart -- htop    # spawns any command"
+echo "Run the tests with:"
+echo "    pytest -m 'not e2e'   # fast unit tests only"
+echo "    pytest                # also runs e2e (needs a configured LLM; real tokens)"

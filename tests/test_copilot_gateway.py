@@ -7,7 +7,7 @@ real GitHub Copilot subscription or network access is required.
 
 Run:
     cd /local_home/bgerofi1/src/ludvart && source .venv/bin/activate \
-        && python tools/test_copilot_gateway.py
+        && python tests/test_copilot_gateway.py
 """
 
 import os

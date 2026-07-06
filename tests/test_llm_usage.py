@@ -7,7 +7,7 @@ API keys, or provider packages are required.
 
 Run:
     cd /local_home/bgerofi1/src/ludvart && source .venv/bin/activate \
-        && python tools/test_llm_usage.py
+        && python tests/test_llm_usage.py
 """
 
 from types import SimpleNamespace

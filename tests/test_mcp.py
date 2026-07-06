@@ -8,7 +8,7 @@ reported without hanging or taking the others down.
 
 Run:
     cd /local_home/bgerofi1/src/ludvart && source .venv/bin/activate \
-        && python tools/test_mcp.py
+        && python tests/test_mcp.py
 """
 
 import json

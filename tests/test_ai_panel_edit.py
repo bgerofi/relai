@@ -2,7 +2,7 @@
 
 Run:
     cd /local_home/bgerofi1/src/ludvart && source .venv/bin/activate \
-        && python tools/test_ai_panel_edit.py
+        && python tests/test_ai_panel_edit.py
 """
 
 from ludvart.lineedit import LineEditor
@@ -63,15 +63,15 @@ def test_line_editor():
 
 def test_input_view_scroll():
     panel = AiPanel(cols=20, height=8, provider="test")
-    # prompt "ludvart> " is 7 chars -> avail = 13
+    # prompt "ludvart> " is 9 chars -> avail = 11
     panel.editor.insert("abcdefghij")  # 10 chars, fits
     visible, col = panel._input_view()
     assert visible == "abcdefghij"
-    assert col == 7 + 10 + 1  # after last char
+    assert col == 9 + 10 + 1  # after last char (capped at cols=20)
 
-    panel.editor.insert("klmnopqrst")  # now 20 chars, wider than avail=13
+    panel.editor.insert("klmnopqrst")  # now 20 chars, wider than avail=11
     visible, col = panel._input_view()
-    assert len(visible) == 13
+    assert len(visible) == 11
     # cursor is at end -> window shows the tail, cursor clamps to last column
     assert visible.endswith("t")
     assert col == 20
@@ -80,7 +80,7 @@ def test_input_view_scroll():
     panel.editor.home()
     visible, col = panel._input_view()
     assert visible.startswith("a")
-    assert col == 8  # len(prompt)+1
+    assert col == 10  # len(prompt)+1
     print("input view scroll: OK")
 
 
