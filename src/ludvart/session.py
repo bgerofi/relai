@@ -17,7 +17,7 @@ from __future__ import annotations
 
 import json
 import os
-from datetime import datetime, timezone
+from datetime import datetime, timedelta, timezone
 from pathlib import Path
 from typing import Any
 
@@ -118,6 +118,20 @@ class SessionStore:
     ) -> "SessionStore":
         """Return a store bound to an already-saved session directory."""
         return cls(root=root, session_id=session_id)
+
+    @classmethod
+    def create_new(cls, root: Path | str | None = None) -> "SessionStore":
+        """Return a store bound to a directory that does not yet exist.
+
+        Session ids have one-second resolution and no collision suffix, so two
+        sessions started within the same second would otherwise share a
+        directory and clobber each other on save. Advance ``started_at`` one
+        second at a time (no sleeping) until an unused directory is found.
+        """
+        store = cls(root=root)
+        while store.dir.exists():
+            store = cls(root=root, started_at=store.started_at + timedelta(seconds=1))
+        return store
 
     def save(
         self,
@@ -314,7 +328,7 @@ SLASH_COMMANDS: dict[str, list[str]] = {
     "help": [],
     "init_helpers": [],
     "mcp_refresh": [],
-    "sessions": ["list", "load"],
+    "sessions": ["list", "load", "new"],
 }
 
 # One-line usage + description for each command, shown by ``/help``. Ordered the
@@ -338,6 +352,7 @@ SLASH_COMMAND_HELP: list[tuple[str, str]] = [
     ),
     ("/sessions list", "List saved conversation sessions (current is marked *)."),
     ("/sessions load <n>|<id>", "Load and resume a saved session by number or id."),
+    ("/sessions new", "Start a fresh, empty conversation in a new session file."),
 ]
 
 

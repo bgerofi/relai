@@ -1116,8 +1116,30 @@ class Ludvart:
                 panel.add_system("Usage: /sessions load <n>|<id>")
                 return
             self._load_session(args[1])
+        elif sub == "new":
+            self._new_session()
         else:
             panel.add_system(f"Unknown subcommand: /sessions {sub}")
+
+    def _new_session(self) -> None:
+        """Start a fresh, empty conversation in a brand-new session file.
+
+        Clears both the model-facing history and the on-screen transcript and
+        binds a new ``SessionStore`` so nothing from the previous conversation
+        (including any provider-specific message shapes) is replayed. The
+        previous session's file is left untouched on disk.
+        """
+        panel = self._panel
+        if panel is None:
+            return
+        self._llm_history = []
+        self._panel_messages = []
+        panel.restore([])
+        # create_new() guarantees a directory that does not collide with the
+        # current (or any existing) session, so the fresh, empty conversation
+        # never overwrites the one we just left.
+        self._session = SessionStore.create_new()
+        panel.add_system(f"Started new session {self._session.session_id}.")
 
     def _load_session(self, ref: str) -> None:
         """Load a saved session by 1-based list index or by id and resume it."""

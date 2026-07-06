@@ -152,6 +152,48 @@ def test_sessions_list_and_load():
     print("sessions list + load + resume: OK")
 
 
+def test_sessions_new_starts_empty_session():
+    root = Path(tempfile.mkdtemp())
+    r = make_ludvart(root)
+    r._session = SessionStore()
+
+    # Build up a conversation in the current session.
+    type_and_submit(r, "hello")
+    type_and_submit(r, "world")
+    old_id = r._session.session_id
+    old_path = r._session.path
+    assert len(r._llm_history) == 4
+    assert old_path.is_file()
+
+    # /sessions new must clear everything and bind a brand-new session file.
+    type_and_submit(r, "/sessions new")
+
+    # Model-facing history and the on-screen transcript are both empty.
+    assert r._llm_history == [], r._llm_history
+    assert r._panel_messages == [], r._panel_messages
+    transcript = [(k, t) for k, t in r._panel.messages if k != "system"]
+    assert transcript == [], transcript
+
+    # A new session id (and file) is bound; the old file is untouched.
+    assert r._session.session_id != old_id
+    old_data = json.loads(old_path.read_text())
+    assert [m[1] for m in old_data["messages"] if m[0] == "you"] == ["hello", "world"]
+
+    # A confirmation note is shown.
+    last = r._panel.messages[-1]
+    assert last[0] == "system" and "Started new session" in last[1], last
+
+    # Continuing writes into the NEW session's file, not the old one.
+    type_and_submit(r, "fresh")
+    new_data = json.loads(r._session.path.read_text())
+    assert r._session.path != old_path
+    assert [m[1] for m in new_data["messages"] if m[0] == "you"] == ["fresh"]
+    # The old file still has only its original two turns.
+    old_after = json.loads(old_path.read_text())
+    assert [m[1] for m in old_after["messages"] if m[0] == "you"] == ["hello", "world"]
+    print("sessions new starts empty session: OK")
+
+
 def test_load_by_id_and_errors():
     root = Path(tempfile.mkdtemp())
     r = make_ludvart(root)
@@ -196,6 +238,7 @@ if __name__ == "__main__":
     test_conversation_saved_and_extended()
     test_slash_command_not_persisted()
     test_sessions_list_and_load()
+    test_sessions_new_starts_empty_session()
     test_load_by_id_and_errors()
     test_tab_completion_in_panel()
     print("\nALL session integration tests passed.")

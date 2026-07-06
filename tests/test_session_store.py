@@ -139,6 +139,25 @@ def test_open_existing_binds_to_same_file():
     print("open_existing binds to same file: OK")
 
 
+def test_create_new_avoids_directory_collision():
+    root = Path(tempfile.mkdtemp())
+    # Occupy the directory the next create_new() would pick (same second).
+    first = SessionStore(root=root)
+    first.save([("you", "hi")], [])
+    assert first.dir.exists()
+
+    # create_new must not reuse it; it advances to a free directory.
+    second = SessionStore.create_new(root=root)
+    assert second.dir != first.dir, (first.dir, second.dir)
+    assert not second.dir.exists()  # unused until first save
+
+    # The existing session is untouched after the new one saves.
+    second.save([("you", "fresh")], [])
+    first_data = json.loads(first.path.read_text())
+    assert [m for m in first_data["messages"]] == [["you", "hi"]]
+    print("create_new avoids directory collision: OK")
+
+
 def test_sessions_root_env_override(monkeypatch=None):
     import os
 
@@ -452,6 +471,7 @@ def test_complete_slash():
     # subcommand completion
     assert complete_slash("/sessions li") == "/sessions list "
     assert complete_slash("/sessions lo") == "/sessions load "
+    assert complete_slash("/sessions n") == "/sessions new "
     # ambiguous subcommand prefix "l" -> common prefix is "l" (== word) -> None
     assert complete_slash("/sessions l") is None
     # a command with no subcommands does not complete its argument
@@ -475,6 +495,7 @@ if __name__ == "__main__":
     test_list_sessions_sorted_with_preview()
     test_list_sessions_empty_and_missing_root()
     test_open_existing_binds_to_same_file()
+    test_create_new_avoids_directory_collision()
     test_sessions_root_env_override()
     test_save_records_provider()
     test_provider_family_mapping()
