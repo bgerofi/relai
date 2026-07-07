@@ -377,6 +377,7 @@ SLASH_COMMANDS: dict[str, list[str]] = {
     "help": [],
     "init_helpers": [],
     "mcp_refresh": [],
+    "model": ["add", "list", "remove", "use"],
     "sessions": ["list", "load", "new"],
 }
 
@@ -402,6 +403,10 @@ SLASH_COMMAND_HELP: list[tuple[str, str]] = [
     ("/sessions list", "List saved conversation sessions (current is marked *)."),
     ("/sessions load <n>|<id>", "Load and resume a saved session by number or id."),
     ("/sessions new", "Start a fresh, empty conversation in a new session file."),
+    ("/model list", "List registered models (in-use and available are marked)."),
+    ("/model add", "Register a new model endpoint (guided prompts, then verify)."),
+    ("/model use <n>|<model>", "Switch to another registered, available model."),
+    ("/model remove <n>|<model>", "Unregister a model (not the one in use)."),
 ]
 
 

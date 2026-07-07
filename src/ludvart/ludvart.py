@@ -49,9 +49,11 @@ from .session import (
     working_history,
 )
 from .llm import ToolSpec
+from .models import PROVIDER_MENU, find_registration, label as model_label
 
 if TYPE_CHECKING:
     from .llm import LLMClient, ToolCall
+    from .backend import ModelManager
 
 # ludvart commands are entered with a prefix key (like screen/tmux) followed by a
 # command letter. A single-byte control character is used as the prefix so no
@@ -253,11 +255,18 @@ class Ludvart:
         prefix: bytes = DEFAULT_PREFIX,
         summon: bytes = DEFAULT_SUMMON,
         llm: "LLMClient | None" = None,
+        model_manager: "ModelManager | None" = None,
     ) -> None:
         self.command = list(command)
         self.prefix = prefix
         self.summon = summon
-        self.llm = llm
+        # ``_models`` is the multi-model registry manager (None when running
+        # with a single injected client or as a plain relay). When present it
+        # owns the active client, so it wins over the ``llm`` argument.
+        self._models = model_manager
+        self.llm = model_manager.client if model_manager is not None else llm
+        # Guided ``/model add`` input flow state (None unless collecting fields).
+        self._model_add: dict | None = None
         self._child_pid: int = -1
         self._master_fd: int = -1
         self._stdin_fd = sys.stdin.fileno()
@@ -897,6 +906,10 @@ class Ludvart:
         if panel.thinking:
             return
         question = panel.take_input()
+        # A guided ``/model add`` flow consumes plain input lines until done.
+        if self._model_add is not None:
+            self._feed_model_add(question)
+            return
         if not question:
             return
         if question.startswith("/"):
@@ -952,6 +965,8 @@ class Ludvart:
         args = parts[1:]
         if cmd == "sessions":
             self._cmd_sessions(args)
+        elif cmd == "model":
+            self._cmd_model(args)
         elif cmd == "init_helpers":
             self._cmd_init_helpers()
         elif cmd == "compact":
@@ -1144,6 +1159,258 @@ class Ludvart:
         # never overwrites the one we just left.
         self._session = SessionStore.create_new()
         panel.add_system(f"Started new session {self._session.session_id}.")
+
+    # -- /model: multi-model registry ---------------------------------------
+
+    def _cmd_model(self, args: list[str]) -> None:
+        """Handle ``/model [list|use|add|remove ...]``."""
+        panel = self._panel
+        if panel is None:
+            return
+        if self._models is None:
+            panel.add_system(
+                "Model management is unavailable (no registry; started with a "
+                "fixed model or --no-llm)."
+            )
+            return
+        sub = args[0] if args else "list"
+        if sub == "list":
+            self._model_list()
+        elif sub == "use":
+            if len(args) < 2:
+                panel.add_system("Usage: /model use <n>|<model>")
+                return
+            self._model_use(args[1])
+        elif sub == "remove":
+            if len(args) < 2:
+                panel.add_system("Usage: /model remove <n>|<model>")
+                return
+            self._model_remove(args[1])
+        elif sub == "add":
+            self._model_add_start()
+        else:
+            panel.add_system(f"Unknown subcommand: /model {sub}")
+
+    def _model_list(self) -> None:
+        panel = self._panel
+        if panel is None or self._models is None:
+            return
+        panel.add_system("Registered models:")
+        for line in self._models.describe():
+            panel.add_system(line)
+        panel.add_system("Use /model use <n>, /model add, or /model remove <n>.")
+
+    def _model_status(self, message: str) -> None:
+        """Show a backend build step (e.g. gateway launch) on the spinner.
+
+        Called from the ``/model use`` / ``/model add`` worker thread; updating
+        ``panel.activity`` there is the same pattern used for streaming turns.
+        """
+        panel = self._panel
+        if panel is not None:
+            panel.activity = message.rstrip(". ")
+
+    def _model_use(self, token: str) -> None:
+        panel = self._panel
+        if panel is None or self._models is None:
+            return
+        mgr = self._models
+        idx = find_registration(mgr.models, token)
+        if idx is None:
+            panel.add_system(f"No model matches {token!r}. See /model list.")
+            return
+
+        def worker() -> str:
+            ok, msg = mgr.use(idx, status=self._model_status)
+            if ok:
+                # The manager now owns the new active client; adopt it.
+                self.llm = mgr.client
+                if self._panel is not None:
+                    self._panel.provider = getattr(
+                        mgr.client, "name", self._panel.provider
+                    )
+            return msg
+
+        self._start_action(
+            worker,
+            info=f"Switching to {model_label(mgr.models[idx])}\u2026",
+            activity="Switching model",
+        )
+
+    def _model_remove(self, token: str) -> None:
+        panel = self._panel
+        if panel is None or self._models is None:
+            return
+        mgr = self._models
+        idx = find_registration(mgr.models, token)
+        if idx is None:
+            panel.add_system(f"No model matches {token!r}. See /model list.")
+            return
+        _ok, msg = mgr.remove(idx)
+        panel.add_system(msg)
+
+    def _model_add_start(self) -> None:
+        """Begin the guided ``/model add`` flow (fields typed in the panel)."""
+        panel = self._panel
+        if panel is None or self._models is None:
+            return
+        panel.add_system("Add a model (type 'cancel' at any prompt to abort).")
+        panel.add_system("Select the API endpoint type:")
+        for i, (_name, menu_label, _url) in enumerate(PROVIDER_MENU, 1):
+            panel.add_system(f"  {i}) {menu_label}")
+        panel.add_system(f"Choice [1-{len(PROVIDER_MENU)}]:")
+        self._model_add = {"step": "provider", "data": {}}
+        self._render_split()
+
+    def _feed_model_add(self, line: str) -> None:
+        """Advance the guided ``/model add`` flow with one typed answer."""
+        panel = self._panel
+        if panel is None or self._model_add is None:
+            return
+        answer = line.strip()
+        if answer.lower() == "cancel":
+            self._model_add = None
+            panel.masked = False
+            panel.add_system("Model add cancelled.")
+            self._render_split()
+            return
+
+        step = self._model_add["step"]
+        data = self._model_add["data"]
+        if step == "provider":
+            self._model_add_provider(answer)
+        elif step == "url":
+            if not answer and not data.get("default_url"):
+                panel.add_system("An endpoint URL is required (or 'cancel').")
+            else:
+                data["api_url"] = answer or data["default_url"]
+                self._model_add["step"] = "key"
+                panel.masked = True
+                panel.add_system("API key (input hidden):")
+        elif step == "key":
+            if not answer:
+                panel.add_system("An API key is required (or 'cancel').")
+            else:
+                data["api_key"] = answer
+                panel.masked = False
+                self._model_add["step"] = "model"
+                panel.add_system("Model name (e.g. gpt-4o, claude-..., gemini-...):")
+        elif step == "model":
+            if not answer:
+                panel.add_system("A model name is required (or 'cancel').")
+            else:
+                data["model"] = answer
+                self._finish_model_add(
+                    {
+                        "provider": data["provider"],
+                        "api_url": data.get("api_url", ""),
+                        "api_key": data.get("api_key", ""),
+                        "model": answer,
+                        "context_window": 0,
+                        "active": False,
+                    }
+                )
+                return
+        elif step == "copilot_model":
+            choices = data.get("copilot_choices") or []
+            slug = answer
+            if answer.isdigit() and choices:
+                n = int(answer)
+                if not (1 <= n <= len(choices)):
+                    panel.add_system(
+                        f"Please enter a number 1-{len(choices)} or a model slug."
+                    )
+                    self._render_split()
+                    return
+                slug = choices[n - 1]
+            if not slug:
+                panel.add_system("A model slug is required (or 'cancel').")
+            else:
+                self._finish_model_add(
+                    {
+                        "provider": "copilot",
+                        "api_url": "",
+                        "api_key": "",
+                        "model": slug,
+                        "context_window": 0,
+                        "active": False,
+                    }
+                )
+                return
+        self._render_split()
+
+    def _model_add_provider(self, answer: str) -> None:
+        """Handle the provider-selection step of ``/model add``."""
+        panel = self._panel
+        if panel is None:
+            return
+        choice = answer.lower()
+        picked = None
+        if choice.isdigit() and 1 <= int(choice) <= len(PROVIDER_MENU):
+            picked = PROVIDER_MENU[int(choice) - 1]
+        else:
+            picked = next((p for p in PROVIDER_MENU if p[0] == choice), None)
+        if picked is None:
+            panel.add_system(f"Please enter a number 1-{len(PROVIDER_MENU)}.")
+            return
+        provider, _menu_label, default_url = picked
+        data = self._model_add["data"]
+        data["provider"] = provider
+        if provider == "copilot":
+            from .gateway import (
+                copilot_authenticated,
+                list_copilot_models,
+                litellm_available,
+            )
+
+            if not (litellm_available() and copilot_authenticated()):
+                self._model_add = None
+                panel.add_system(
+                    "GitHub Copilot isn't authorized here. Run `ludvart` in a "
+                    "terminal and add the Copilot model via the setup wizard first."
+                )
+                return
+            self._model_add["step"] = "copilot_model"
+            choices = list_copilot_models()
+            data["copilot_choices"] = choices
+            if choices:
+                panel.add_system("Models available to your GitHub Copilot account:")
+                for i, slug in enumerate(choices, 1):
+                    panel.add_system(f"  {i}) {slug}")
+                panel.add_system(
+                    f"Choice [1-{len(choices)}] or type a model slug:"
+                )
+            else:
+                panel.add_system(
+                    "Copilot model slug (e.g. gpt-4o, claude-opus-4.8):"
+                )
+            return
+        data["default_url"] = default_url
+        self._model_add["step"] = "url"
+        prompt = (
+            f"Endpoint URL [{default_url}]:" if default_url else "Endpoint URL:"
+        )
+        panel.add_system(prompt)
+
+    def _finish_model_add(self, reg: dict) -> None:
+        """Verify and register the collected model on the panel spinner."""
+        panel = self._panel
+        self._model_add = None
+        if panel is not None:
+            panel.masked = False
+        if self._models is None:
+            return
+        mgr = self._models
+
+        def worker() -> str:
+            _ok, msg = mgr.add(reg, status=self._model_status)
+            return msg
+
+        self._start_action(
+            worker,
+            info=f"Verifying {model_label(reg)}\u2026",
+            activity="Verifying model",
+        )
 
     def _load_session(self, ref: str) -> None:
         """Load a saved session by 1-based list index or by id and resume it."""

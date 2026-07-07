@@ -47,6 +47,9 @@ class AiPanel:
         self.interim = ""
         # Percent of the context window used by the last request (None = unknown).
         self.context_pct: float | None = None
+        # When True the input line is rendered masked (e.g. while typing an API
+        # key during the guided /model add flow). The stored text is untouched.
+        self.masked = False
 
     # -- state mutation ------------------------------------------------------
 
@@ -130,6 +133,9 @@ class AiPanel:
         avail = max(1, self.cols - len(_PROMPT) - prefix_w)
         text = self.editor.text
         cur = self.editor.cursor
+        if self.masked:
+            # Render the key as asterisks; same length so the cursor math holds.
+            text = "*" * len(text)
         if len(text) <= avail:
             start = 0
         else:

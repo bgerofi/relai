@@ -19,11 +19,13 @@ from __future__ import annotations
 import contextlib
 import ctypes
 import os
+import queue
 import shutil
 import signal
 import socket
 import subprocess
 import sys
+import threading
 import time
 import urllib.error
 import urllib.request
@@ -171,6 +173,51 @@ def _linux_set_pdeathsig() -> None:
         pass
 
 
+# The gateway subprocess uses PR_SET_PDEATHSIG (see ``_linux_set_pdeathsig``) so
+# it is cleaned up if ludvart dies. On Linux that signal fires when the *thread*
+# that forked the child terminates -- not the parent process. If we forked from
+# a short-lived worker thread (e.g. the ``/model use`` action thread) the gateway
+# would be killed the instant that thread finished, right after verification. To
+# avoid that, all gateway forks are funnelled through one persistent daemon
+# thread that lives for the whole process, so the death signal only fires at
+# interpreter shutdown (the intended orphan cleanup).
+_spawn_lock = threading.Lock()
+_spawn_thread: "threading.Thread | None" = None
+_spawn_requests: "queue.Queue" = queue.Queue()
+
+
+def _spawner_loop() -> None:
+    while True:
+        func, box, done = _spawn_requests.get()
+        try:
+            box[0] = func()
+        except BaseException as exc:  # relayed to the caller
+            box[1] = exc
+        finally:
+            done.set()
+
+
+def _spawn_process(func):
+    """Run ``func`` (which forks a subprocess) on the persistent spawner thread.
+
+    Returns ``func``'s result or re-raises its exception on the caller's thread.
+    """
+    global _spawn_thread
+    with _spawn_lock:
+        if _spawn_thread is None:
+            _spawn_thread = threading.Thread(
+                target=_spawner_loop, name="ludvart-gateway-spawner", daemon=True
+            )
+            _spawn_thread.start()
+    box: list = [None, None]
+    done = threading.Event()
+    _spawn_requests.put((func, box, done))
+    done.wait()
+    if box[1] is not None:
+        raise box[1]
+    return box[0]
+
+
 class CopilotGateway:
     """A local ``litellm`` proxy fronting GitHub Copilot for ludvart.
 
@@ -224,15 +271,23 @@ class CopilotGateway:
         ]
         # Detach into its own process group so we can tear down the whole tree,
         # and route its noisy output to a log file (never the terminal, which
-        # ludvart composites at runtime).
+        # ludvart composites at runtime). The fork itself happens on the shared
+        # spawner thread so PR_SET_PDEATHSIG is anchored to a long-lived task
+        # (see ``_spawn_process``), not a transient worker thread.
         with open(self.log_path, "ab", buffering=0) as logf:
-            self._proc = subprocess.Popen(
-                cmd,
-                stdout=logf,
-                stderr=logf,
-                stdin=subprocess.DEVNULL,
-                start_new_session=True,
-                preexec_fn=_linux_set_pdeathsig if sys.platform.startswith("linux") else None,
+            self._proc = _spawn_process(
+                lambda: subprocess.Popen(
+                    cmd,
+                    stdout=logf,
+                    stderr=logf,
+                    stdin=subprocess.DEVNULL,
+                    start_new_session=True,
+                    preexec_fn=(
+                        _linux_set_pdeathsig
+                        if sys.platform.startswith("linux")
+                        else None
+                    ),
+                )
             )
         self._await_ready(timeout)
 

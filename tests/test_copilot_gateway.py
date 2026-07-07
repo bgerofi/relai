@@ -123,6 +123,44 @@ def test_gateway_start_and_stop(tmp, monkeypatch_cli):
     print("gateway start/stop: OK")
 
 
+def test_gateway_survives_worker_thread(tmp, monkeypatch_cli):
+    """Regression: a gateway started on a short-lived thread must keep running.
+
+    ``/model use`` runs on a transient daemon worker thread. Because the gateway
+    child uses ``PR_SET_PDEATHSIG`` (which, on Linux, fires when the *forking
+    thread* dies), forking from that worker thread used to kill the gateway the
+    moment the switch finished -- the next request then hit a dead proxy. The
+    fork is now funnelled through a persistent spawner thread, so the gateway
+    must still be serving after the starting thread has exited.
+    """
+    import threading
+
+    monkeypatch_cli(_make_cli(tmp, _FAKE_SERVER))
+    gw = CopilotGateway("gpt-4o", log_path=os.path.join(tmp, "gw.log"))
+    error: list = []
+
+    def worker():
+        try:
+            gw.start(timeout=15)
+        except Exception as exc:  # pragma: no cover - surfaced via assert below
+            error.append(exc)
+
+    t = threading.Thread(target=worker)
+    t.start()
+    t.join()
+    assert not error, error
+    # The starting thread is now dead; give any stray PR_SET_PDEATHSIG a chance.
+    time.sleep(0.5)
+    try:
+        with urllib.request.urlopen(
+            gw.base_url + "/health/liveliness", timeout=3
+        ) as resp:
+            assert resp.status == 200
+    finally:
+        gw.stop()
+    print("gateway survives worker thread: OK")
+
+
 def test_gateway_start_failure(tmp, monkeypatch_cli):
     monkeypatch_cli(_make_cli(tmp, _FAKE_DEAD))
     gw = CopilotGateway("gpt-4o", log_path=os.path.join(tmp, "gw.log"))
@@ -179,6 +217,7 @@ def _run():
         test_config_helpers,
         test_gateway_model_and_url,
         test_gateway_start_and_stop,
+        test_gateway_survives_worker_thread,
         test_gateway_start_failure,
         test_missing_cli_raises,
         test_choose_copilot_model,
