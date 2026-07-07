@@ -54,7 +54,7 @@ def test_save_and_reload_roundtrip():
 
     assert store.path.is_file()
     data = json.loads(store.path.read_text())
-    assert data["version"] == 2
+    assert data["version"] == 3
     assert data["session_id"] == "2026-07-02/08_05_09"
     assert data["started_at"] == "2026-07-02T08:05:09Z"
     assert data["updated_at"].endswith("Z")

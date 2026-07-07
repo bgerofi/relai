@@ -43,8 +43,9 @@ from .session import (
     complete_slash,
     list_sessions,
     load_session,
+    neutralize_history,
+    NEUTRAL_SESSIONS_VERSION,
     provider_family,
-    sanitize_history,
     working_history,
 )
 from .llm import ToolSpec
@@ -288,9 +289,12 @@ class Ludvart:
         self._phys_rows = 0
         self._phys_cols = 0
         self._ai_ask = None
-        # Full running conversation sent to the LLM. Each user turn embeds the
-        # terminal screen snapshot taken at ask time (the panel transcript only
-        # keeps the visible question/answer text, so this is a separate buffer).
+        # The running conversation, kept in a provider-neutral log (see the
+        # neutral-log schema in llm.py). Each user turn embeds the terminal
+        # screen snapshot taken at ask time (the panel transcript only keeps the
+        # visible question/answer text, so this is a separate buffer). The
+        # provider-native context is rebuilt from this log at every request, so
+        # the same conversation can be continued by any model.
         self._llm_history: list[dict] = []
         # Background LLM request while the panel spinner animates.
         self._ask_thread: threading.Thread | None = None
@@ -1161,29 +1165,25 @@ class Ludvart:
             panel.add_system(f"Could not load session: {session_id}")
             return
         messages = [tuple(m) for m in data.get("messages", [])]
-        history = working_history(list(data.get("llm_history", [])))
-        # The stored llm_history is in the shape of whichever provider recorded
-        # it. Resuming under a different provider family would replay an
-        # incompatible message shape (e.g. an OpenAI "tool" role to Anthropic,
-        # which errors), so flatten to a neutral form when the families differ.
+        # The stored llm_history is a provider-neutral log (current sessions) or
+        # a provider-native one (sessions written before the neutral refactor).
+        # neutralize_history returns the former unchanged and migrates the
+        # latter, so the running log is always neutral and any model can resume
+        # it (the native context is rebuilt per request by
+        # LLMClient.build_context).
+        version = int(data.get("version", 1) or 1)
         stored_family = provider_family(data.get("provider"))
-        target_family = provider_family(getattr(self.llm, "name", None))
-        sanitized = sanitize_history(history, stored_family, target_family)
-        # sanitize_history flattens to a neutral shape whenever both families
-        # are known and differ; an unknown family on either side is left as-is.
-        converted = (
-            stored_family is not None
-            and target_family is not None
-            and stored_family != target_family
+        neutral = neutralize_history(
+            list(data.get("llm_history", [])), version, stored_family
         )
-        self._llm_history = sanitized
+        history = working_history(neutral)
+        migrated = version < NEUTRAL_SESSIONS_VERSION and bool(history)
+        self._llm_history = history
         self._panel_messages = messages
         panel.restore(messages)
         # Continue writing into the loaded session's file from now on.
         self._session = SessionStore.open_existing(session_id)
-        note = ""
-        if converted:
-            note = " (history adapted from a different provider)"
+        note = " (older session migrated to the portable format)" if migrated else ""
         panel.add_system(
             f"Loaded session {session_id} ({len(messages)} msgs).{note}"
         )
@@ -1345,7 +1345,7 @@ class Ludvart:
                 "resumable brief so you can keep working after older turns are "
                 "dropped.",
             },
-            *self._llm_history,
+            *self._build_llm_context(),
             {"role": "user", "content": instruction},
         ]
         try:
@@ -1383,6 +1383,45 @@ class Ludvart:
         deliver = self._deliver or self._deliver_reply
         deliver(self._ask_result)
         self._render_split()
+
+    def _build_llm_context(self) -> list[dict]:
+        """Render the neutral log into the active client's native messages.
+
+        Delegates to :meth:`LLMClient.build_context` so provider-specific
+        shaping lives on the client (letting clients coexist and be swapped
+        mid-conversation). Lightweight test stubs without ``build_context`` get
+        the raw neutral log, which is close enough for their assertions.
+        """
+        build = getattr(self.llm, "build_context", None)
+        if build is None:
+            return list(self._llm_history)
+        return build(self._llm_history)
+
+    @staticmethod
+    def _neutral_assistant(turn) -> dict:
+        """Neutral log entry for an assistant turn (text + any tool calls).
+
+        Derived from the provider-agnostic :class:`Turn` fields so the stored
+        log never carries a provider-specific message shape; the native shape is
+        rebuilt per request by :meth:`LLMClient.build_context`.
+        """
+        entry: dict = {"role": "assistant", "content": turn.text or ""}
+        if turn.tool_calls:
+            entry["tool_calls"] = [
+                {"id": c.id, "name": c.name, "input": dict(c.input)}
+                for c in turn.tool_calls
+            ]
+        return entry
+
+    @staticmethod
+    def _neutral_tool_result(call, output: str) -> dict:
+        """Neutral log entry for a tool result (keeps id and name for replay)."""
+        return {
+            "role": "tool",
+            "tool_call_id": call.id,
+            "name": call.name,
+            "content": output,
+        }
 
     def _ask_llm(self, question: str) -> str:
         """Ask the LLM, maintaining the full multi-turn conversation.
@@ -1470,12 +1509,12 @@ class Ludvart:
                     panel.interim = _compose()
                 last_stream = ""
                 turn = self.llm.converse(
-                    [system, *self._llm_history],
+                    [system, *self._build_llm_context()],
                     tools=tools,
                     max_tokens=self.REPLY_MAX_TOKENS,
                     on_text=_on_text,
                 )
-                self._llm_history.append(turn.assistant_message)
+                self._llm_history.append(self._neutral_assistant(turn))
                 if turn.usage is not None:
                     pct = turn.usage.context_percent()
                     self._panel_context_pct = pct
@@ -1495,7 +1534,7 @@ class Ludvart:
                         self._panel.interim = _compose()
                     output = self._run_tool(call)
                     self._llm_history.append(
-                        self.llm.tool_result_message(call.id, output)
+                        self._neutral_tool_result(call, output)
                     )
                 if self._panel is not None:
                     self._panel.activity = "Thinking"

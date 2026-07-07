@@ -48,6 +48,22 @@ DEFAULT_MAX_RETRIES = 2
 #: list of provider-native content blocks (text / tool_use / tool_result).
 Message = dict[str, Any]
 
+#: The conversation is stored/replayed as a provider-neutral log; each entry is
+#: one of these shapes. :meth:`LLMClient.build_context` turns a log into the
+#: active provider's native messages at every request.
+#:
+#:   {"role": "user",      "content": <str>}
+#:   {"role": "assistant", "content": <str>, "tool_calls": [
+#:         {"id": <str>, "name": <str>, "input": <dict>}, ...]}   # key optional
+#:   {"role": "tool",      "tool_call_id": <str>, "name": <str>, "content": <str>}
+NEUTRAL_LOG_SCHEMA = "user | assistant(+tool_calls) | tool"
+
+
+def _neutral_tool_calls(entry: Message) -> list[dict]:
+    """Return the neutral ``tool_calls`` list of an assistant entry (or [])."""
+    calls = entry.get("tool_calls")
+    return list(calls) if isinstance(calls, list) else []
+
 
 @dataclass(frozen=True)
 class Usage:
@@ -894,6 +910,55 @@ class LLMClient:
         self._last_usage = turn.usage
         return turn
 
+    def build_context(self, log: Sequence[Message]) -> list[Message]:
+        """Render the neutral conversation ``log`` into this provider's messages.
+
+        The conversation is kept in a provider-neutral log (see
+        :data:`NEUTRAL_LOG_SCHEMA`) so an ongoing conversation can be continued
+        by any model. This method rebuilds the exact message shape *this*
+        provider expects, and is called afresh at every request -- so switching
+        between coexisting clients mid-conversation just works.
+
+        The default is the OpenAI/common chat shape (also used by ``custom``
+        gateways); providers with a different wire shape (:class:`AnthropicClient`,
+        :class:`GoogleClient`) override it. The result carries no ``system``
+        message; callers prepend their own system prompt.
+        """
+        out: list[Message] = []
+        for entry in log:
+            role = entry.get("role")
+            text = entry.get("content") if isinstance(entry.get("content"), str) else ""
+            if role == "assistant":
+                msg: Message = {"role": "assistant", "content": text}
+                calls = _neutral_tool_calls(entry)
+                if calls:
+                    # Keep content non-empty so gateways that drop empty
+                    # assistant messages don't orphan the following tool results.
+                    msg["content"] = text or " "
+                    msg["tool_calls"] = [
+                        {
+                            "id": c.get("id", ""),
+                            "type": "function",
+                            "function": {
+                                "name": c.get("name", ""),
+                                "arguments": json.dumps(c.get("input") or {}),
+                            },
+                        }
+                        for c in calls
+                    ]
+                out.append(msg)
+            elif role == "tool":
+                out.append(
+                    {
+                        "role": "tool",
+                        "tool_call_id": entry.get("tool_call_id", ""),
+                        "content": text,
+                    }
+                )
+            else:
+                out.append({"role": "user", "content": text})
+        return out
+
     def _prepare_converse(
         self,
         messages: Sequence[Message],
@@ -1368,6 +1433,52 @@ class AnthropicClient(LLMClient):
             ],
         }
 
+    def build_context(self, log: Sequence[Message]) -> list[Message]:
+        """Render the neutral log into Anthropic's user/assistant block shape."""
+        out: list[Message] = []
+        for entry in log:
+            role = entry.get("role")
+            text = entry.get("content") if isinstance(entry.get("content"), str) else ""
+            if role == "assistant":
+                blocks: list[dict] = []
+                if text.strip():
+                    blocks.append({"type": "text", "text": text})
+                for c in _neutral_tool_calls(entry):
+                    blocks.append(
+                        {
+                            "type": "tool_use",
+                            "id": c.get("id", ""),
+                            "name": c.get("name", ""),
+                            "input": c.get("input") or {},
+                        }
+                    )
+                # Anthropic rejects an assistant message with no content or a
+                # whitespace-only text block.
+                if not blocks:
+                    blocks.append({"type": "text", "text": "(no content)"})
+                out.append({"role": "assistant", "content": blocks})
+            elif role == "tool":
+                out.append(
+                    {
+                        "role": "user",
+                        "content": [
+                            {
+                                "type": "tool_result",
+                                "tool_use_id": entry.get("tool_call_id", ""),
+                                "content": text,
+                            }
+                        ],
+                    }
+                )
+            else:
+                out.append(
+                    {
+                        "role": "user",
+                        "content": text if text.strip() else "(no content)",
+                    }
+                )
+        return out
+
 
 class GoogleClient(LLMClient):
     """Google Gemini client via the ``google-genai`` SDK.
@@ -1620,6 +1731,44 @@ class GoogleClient(LLMClient):
                 }
             ],
         }
+
+    def build_context(self, log: Sequence[Message]) -> list[Message]:
+        """Render the neutral log into Gemini's block shape (paired by name)."""
+        out: list[Message] = []
+        for entry in log:
+            role = entry.get("role")
+            text = entry.get("content") if isinstance(entry.get("content"), str) else ""
+            if role == "assistant":
+                blocks: list[dict] = []
+                if text:
+                    blocks.append({"type": "text", "text": text})
+                for c in _neutral_tool_calls(entry):
+                    blocks.append(
+                        {
+                            "type": "function_call",
+                            "name": c.get("name", ""),
+                            "args": c.get("input") or {},
+                        }
+                    )
+                out.append({"role": "assistant", "content": blocks})
+            elif role == "tool":
+                # Gemini pairs a response to its call by function name.
+                name = entry.get("name") or entry.get("tool_call_id", "")
+                out.append(
+                    {
+                        "role": "tool",
+                        "content": [
+                            {
+                                "type": "function_response",
+                                "name": name,
+                                "response": {"result": text},
+                            }
+                        ],
+                    }
+                )
+            else:
+                out.append({"role": "user", "content": text})
+        return out
 
 
 def _client_for(

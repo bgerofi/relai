@@ -21,7 +21,20 @@ from datetime import datetime, timedelta, timezone
 from pathlib import Path
 from typing import Any
 
-SESSIONS_VERSION = 2
+#: Bumped to 3 when ``llm_history`` became a provider-neutral log (see
+#: :func:`build_context` / :func:`neutralize_history`). Files written by older
+#: ludvart versions store a provider-native ``llm_history`` and are migrated on
+#: load.
+SESSIONS_VERSION = 3
+
+#: The first ``SESSIONS_VERSION`` whose ``llm_history`` is stored in the
+#: provider-neutral form. Anything older holds a provider-native history.
+NEUTRAL_SESSIONS_VERSION = 3
+
+#: Sentinel "family" for the neutral log: it is not a real provider, but passing
+#: it as the *target* of :func:`sanitize_history` forces the provider-native ->
+#: neutral flattening used to migrate old sessions.
+NEUTRAL_FAMILY = "neutral"
 
 _CONV_NAME = "conversation.json"
 _DAY_FMT = "%Y-%m-%d"
@@ -317,6 +330,42 @@ def sanitize_history(
         else:
             neutral.append({"role": out_role, "content": text})
     return neutral
+
+
+# -- neutral conversation log <-> provider-native context -------------------
+#
+# The conversation is kept in memory (and persisted) as a provider-neutral log
+# whose entries are one of:
+#
+#   {"role": "user",      "content": <str>}
+#   {"role": "assistant", "content": <str>, "tool_calls": [
+#         {"id": <str>, "name": <str>, "input": <dict>}, ...]}   # key optional
+#   {"role": "tool",      "tool_call_id": <str>, "name": <str>, "content": <str>}
+#
+# Rendering a log into a provider's native message shape lives on the provider
+# itself (``LLMClient.build_context``), so provider-specific knowledge stays
+# with the client and multiple clients can coexist. This module only owns the
+# *persistence* side: storing the neutral log and migrating older, provider-
+# native sessions to it on load.
+
+
+def neutralize_history(
+    llm_history: list[dict[str, Any]],
+    version: int,
+    stored_family: str | None,
+) -> list[dict[str, Any]]:
+    """Return a neutral conversation log for a stored ``llm_history``.
+
+    Sessions written at :data:`NEUTRAL_SESSIONS_VERSION` or later already store
+    the neutral form and are returned unchanged. Older sessions hold a
+    provider-native history; they are flattened to the neutral (text-only) form
+    so any model can resume them. The raw tool-call structure of such legacy
+    sessions is not reconstructed -- tool calls/results survive as short text
+    notes -- but the conversation stays intact and resumable.
+    """
+    if version >= NEUTRAL_SESSIONS_VERSION:
+        return list(llm_history)
+    return sanitize_history(llm_history, stored_family, NEUTRAL_FAMILY)
 
 
 # -- slash commands ---------------------------------------------------------
