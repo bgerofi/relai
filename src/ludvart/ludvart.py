@@ -572,7 +572,21 @@ class Ludvart:
                 )
 
             return ask, "no LLM"
-        return self._ask_llm, f"{self.llm.name}:{self.llm.model}"
+        return self._ask_llm, self._active_model_label()
+
+    def _active_model_label(self) -> str:
+        """A ``provider:model`` label for the model currently in use.
+
+        Prefers the active registration (so Copilot shows ``copilot:<model>``
+        rather than the underlying ``custom`` gateway client), falling back to
+        the live client's own name/model when no registry is present.
+        """
+        mgr = getattr(self, "_models", None)
+        if mgr is not None:
+            idx = mgr.active_index()
+            if idx is not None:
+                return model_label(mgr.models[idx])
+        return f"{self.llm.name}:{self.llm.model}"
 
     # -- AI panel (bottom split) --------------------------------------------
 
@@ -1249,9 +1263,7 @@ class Ludvart:
                 # The manager now owns the new active client; adopt it.
                 self.llm = mgr.client
                 if self._panel is not None:
-                    self._panel.provider = getattr(
-                        mgr.client, "name", self._panel.provider
-                    )
+                    self._panel.provider = model_label(mgr.models[idx])
                     self._refresh_context_badge(compacted[0])
             return msg
 

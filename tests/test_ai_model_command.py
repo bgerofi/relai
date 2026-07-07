@@ -87,7 +87,7 @@ def test_model_use_switches():
     r._cmd_model(["use", "2"])
     assert r._models.models[1]["active"]
     assert r.llm is r._models.client
-    assert r._panel.provider == "anthropic"
+    assert r._panel.provider == "anthropic:b"
     print("/model use switches active + client: OK")
 
 
