@@ -10,9 +10,8 @@ everyday CLI tasks? Then you're in the right place.
 
 
 **ludvart** is an AI agent that sits transparently on the character stream between
-you and any terminal-based program you're running, wherever you happen to
-be running it. It sees exactly what you see, and it's ready to help with whatever
-you need, whenever you need it.
+you and any terminal-based program you're running. It sees exactly what you see, 
+and it's ready to help with whatever you need, wherever you need it.
 
 **ludvart** operates at the pseudo-terminal (PTY) layer rather than inside any
 particular application, thus it integrates **seamlessly with any terminal and any
