@@ -145,11 +145,23 @@ class ModelManager:
             lines.append(f"  {i + 1}) {label(reg)}  [{', '.join(marks)}]")
         return lines
 
-    def use(self, index: int, *, status: StatusFn | None = None) -> tuple[bool, str]:
+    def use(
+        self,
+        index: int,
+        *,
+        status: StatusFn | None = None,
+        before_swap: Callable[[LLMClient], None] | None = None,
+    ) -> tuple[bool, str]:
         """Switch the active model to ``index`` (verifying it first).
 
         ``status`` (optional) receives short progress messages while the backend
         is built -- notably the Copilot gateway launch -- so callers can show it.
+
+        ``before_swap`` (optional) is called with the *new*, verified client
+        after it is built but *before* the swap, while the current client (and
+        its gateway) is still live. This lets the caller act against the outgoing
+        model -- e.g. compact the conversation so it fits a smaller new window --
+        before it is torn down.
         """
         reg = self.models[index]
         if reg.get("active"):
@@ -160,6 +172,11 @@ class ModelManager:
         except Exception as exc:
             self.available[index] = False
             return False, f"Could not switch to {label(reg)}: {exc}"
+        if before_swap is not None:
+            try:
+                before_swap(backend.client)
+            except Exception:
+                pass
         old = self.gateway
         self.client = backend.client
         self.gateway = backend.gateway

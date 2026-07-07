@@ -18,9 +18,10 @@ from ludvart.ludvart import Ludvart  # noqa: E402
 
 
 class _FakeClient:
-    def __init__(self, name="openai", ok=True):
+    def __init__(self, name="openai", ok=True, context_window=0):
         self.name = name
         self._ok = ok
+        self.context_window = context_window
 
     def verify(self):
         if not self._ok:
@@ -29,19 +30,25 @@ class _FakeClient:
 
 def _install_fakes():
     def fake_build(reg_, *, status=None):
-        return backend.Backend(_FakeClient(reg_["provider"], reg_.get("_ok", True)))
+        return backend.Backend(
+            _FakeClient(
+                reg_["provider"],
+                reg_.get("_ok", True),
+                reg_.get("context_window", 0),
+            )
+        )
 
     backend.build_backend = fake_build
     backend.verify_backend = lambda b: b.client.verify()
 
 
-def _reg(provider="openai", model="m", active=False):
+def _reg(provider="openai", model="m", active=False, context_window=0):
     return {
         "provider": provider,
         "api_url": "http://x",
         "api_key": "k",
         "model": model,
-        "context_window": 0,
+        "context_window": context_window,
         "active": active,
     }
 
@@ -82,6 +89,67 @@ def test_model_use_switches():
     assert r.llm is r._models.client
     assert r._panel.provider == "anthropic"
     print("/model use switches active + client: OK")
+
+
+def test_switch_recomputes_badge_for_new_window():
+    _install_fakes()
+    r = _make_ludvart(
+        [
+            _reg(model="a", active=True, context_window=100_000),
+            _reg("anthropic", "b", context_window=200_000),
+        ]
+    )
+    r._llm_history = [{"role": "user", "content": "hi"}]
+    r._last_input_tokens = 20_000  # 20% of the 200k target window
+    r._cmd_model(["use", "2"])
+    assert r._panel.context_pct == 10.0
+    assert r._panel_context_pct == 10.0
+    print("switch recomputes badge for new window: OK")
+
+
+def test_switch_auto_compacts_when_new_window_too_small():
+    _install_fakes()
+    r = _make_ludvart(
+        [
+            _reg(model="a", active=True, context_window=200_000),
+            _reg("anthropic", "b", context_window=1_000),
+        ]
+    )
+    r._llm_history = [
+        {"role": "user", "content": "q1"},
+        {"role": "assistant", "content": "a1"},
+        {"role": "user", "content": "q2"},
+    ]
+    r._last_input_tokens = 900  # 90% of the 1000-token target -> over threshold
+    called = []
+    r._compact_history = lambda: (called.append(True) or "SUMMARY")
+    r._estimate_context_pct = lambda summary: 3.0
+    r._cmd_model(["use", "2"])
+    assert called, "expected compaction before switching to the smaller model"
+    assert r._panel.context_pct == 3.0
+    print("switch auto-compacts when new window too small: OK")
+
+
+def test_switch_no_compaction_when_it_fits():
+    _install_fakes()
+    r = _make_ludvart(
+        [
+            _reg(model="a", active=True, context_window=200_000),
+            _reg("anthropic", "b", context_window=200_000),
+        ]
+    )
+    r._llm_history = [
+        {"role": "user", "content": "q1"},
+        {"role": "assistant", "content": "a1"},
+        {"role": "user", "content": "q2"},
+    ]
+    r._last_input_tokens = 1_000  # 0.5% of the target -> no compaction
+    called = []
+    r._compact_history = lambda: (called.append(True) or "SUMMARY")
+    r._cmd_model(["use", "2"])
+    assert not called
+    assert r._panel.context_pct == 0.5
+    print("switch skips compaction when history fits: OK")
 
 
 def test_model_use_by_name_and_unknown():
@@ -210,6 +278,9 @@ def test_guided_add_cancel():
 def main():
     test_model_list()
     test_model_use_switches()
+    test_switch_recomputes_badge_for_new_window()
+    test_switch_auto_compacts_when_new_window_too_small()
+    test_switch_no_compaction_when_it_fits()
     test_model_use_by_name_and_unknown()
     test_model_remove()
     test_guided_add_flow_direct_provider()

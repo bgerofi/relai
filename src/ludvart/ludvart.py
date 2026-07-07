@@ -284,6 +284,10 @@ class Ludvart:
         self._panel_closing = False
         self._panel_messages: list[tuple[str, str]] = []
         self._panel_context_pct: float | None = None
+        # Raw prompt-token count from the last turn's usage, kept so a model
+        # switch can re-derive the context badge (and decide whether to compact)
+        # against the *new* model's window without waiting for the next turn.
+        self._last_input_tokens: int | None = None
         # Bracketed-paste accumulator for the panel input (paste bursts may span
         # several stdin reads and can embed newlines).
         self._panel_pasting = False
@@ -1221,7 +1225,26 @@ class Ludvart:
             return
 
         def worker() -> str:
-            ok, msg = mgr.use(idx, status=self._model_status)
+            # Runs while the *old* model is still active. If the conversation
+            # would overflow the target model's (possibly smaller) window,
+            # compact it here -- using the outgoing model, which can still hold
+            # the full history -- before the swap tears that model down.
+            compacted: list[str | None] = [None]
+
+            def before_swap(new_client) -> None:
+                new_cw = getattr(new_client, "context_window", 0) or 0
+                if (
+                    new_cw > 0
+                    and self._last_input_tokens
+                    and len(self._llm_history) > 2
+                    and 100.0 * self._last_input_tokens / new_cw
+                    >= self.CONTEXT_COMPACT_PCT
+                ):
+                    compacted[0] = self._compact_history()
+
+            ok, msg = mgr.use(
+                idx, status=self._model_status, before_swap=before_swap
+            )
             if ok:
                 # The manager now owns the new active client; adopt it.
                 self.llm = mgr.client
@@ -1229,6 +1252,7 @@ class Ludvart:
                     self._panel.provider = getattr(
                         mgr.client, "name", self._panel.provider
                     )
+                    self._refresh_context_badge(compacted[0])
             return msg
 
         self._start_action(
@@ -1236,6 +1260,27 @@ class Ludvart:
             info=f"Switching to {model_label(mgr.models[idx])}\u2026",
             activity="Switching model",
         )
+
+    def _refresh_context_badge(self, summary: str | None) -> None:
+        """Re-derive the context badge for the model now in ``self.llm``.
+
+        After a switch the window may differ, so the ``[NN%]`` badge is recomputed
+        immediately (rather than waiting for the next turn). ``summary`` is the
+        text of a just-performed compaction, if any, so the estimate reflects the
+        shrunken history.
+        """
+        panel = self._panel
+        if panel is None:
+            return
+        if summary is not None:
+            pct = self._estimate_context_pct(summary)
+        elif self._last_input_tokens:
+            cw = getattr(self.llm, "context_window", 0) or 0
+            pct = (100.0 * self._last_input_tokens / cw) if cw > 0 else None
+        else:
+            pct = None
+        panel.context_pct = pct
+        self._panel_context_pct = pct
 
     def _model_remove(self, token: str) -> None:
         panel = self._panel
@@ -1785,6 +1830,7 @@ class Ludvart:
                 if turn.usage is not None:
                     pct = turn.usage.context_percent()
                     self._panel_context_pct = pct
+                    self._last_input_tokens = turn.usage.input_tokens
                     if self._panel is not None:
                         self._panel.context_pct = pct
                 if not turn.tool_calls:
