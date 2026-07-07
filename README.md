@@ -96,28 +96,10 @@ name. Option 5 (GitHub Copilot) runs GitHub's device-flow authorization and then
 lets you pick from the models your account can use — see
 [GitHub Copilot](#more-on-github-copilot-via-litellm) below.
 
-Once at least one model is registered, you add and switch between models from the
-AI panel with the **`/model`** command (see [Managing models](#managing-models)).
+Once at least one model is registered, you can add and switch between models from
+the AI panel with the **`/model`** command (see [Managing models](#managing-models)).
 At startup ludvart verifies **every** registered model and marks the reachable
 ones as *available*.
-
-### Managing models
-
-Inside the AI panel, `/model` manages the registry:
-
-- `/model list` — list all registered models; the one in use and the ones that
-  passed verification are marked.
-- `/model add` — register a new model through guided prompts (endpoint type,
-  URL, API key, model name; the key is hidden as you type). For GitHub Copilot it
-  lists the models your subscription can use. The new model is verified before it
-  is saved and does not become the active one.
-- `/model use <n>|<name>` — switch to another registered model by its list number
-  or a substring of its name (only *available* models can be selected).
-- `/model remove <n>|<name>` — unregister a model (not the one currently in use).
-
-Switching to (or adding) a GitHub Copilot model launches its local gateway on
-demand. ludvart runs **one gateway at a time** — for the active Copilot model —
-and tears it down when you switch away or exit.
 
 
 ## Summoning the agent
@@ -236,38 +218,23 @@ modified.
 
 ## Miscelanous
 
-### LLM Providers
+### Managing models
 
-Model registrations live in `~/.ludvart/models.json` (managed by the wizard and
-`/model`). For backwards compatibility, if that file does not yet exist ludvart
-performs a **one-time migration**: it seeds the registry from a provider triplet
-(URL, key, model) read from the environment or the legacy `~/.ludvart/llm.conf`.
-Once the registry exists, `models.json` is the source of truth and these
-variables are no longer consulted for model selection.
+Inside the AI panel, `/model` manages the registry:
 
-So to seed your first model non-interactively, set the three variables for one
-provider before the first run:
+- `/model list` — list all registered models; the one in use and the ones that
+  passed verification are marked.
+- `/model add` — register a new model through guided prompts (endpoint type,
+  URL, API key, model name; the key is hidden as you type). For GitHub Copilot it
+  lists the models your subscription can use. The new model is verified before it
+  is saved and does not become the active one.
+- `/model use <n>|<name>` — switch to another registered model by its list number
+  or a substring of its name (only *available* models can be selected).
+- `/model remove <n>|<name>` — unregister a model (not the one currently in use).
 
-| Provider  | URL                 | Key                 | Model             |
-|-----------|---------------------|---------------------|-------------------|
-| OpenAI    | `OPENAI_API_URL`    | `OPENAI_API_KEY`    | `OPENAI_MODEL`    |
-| Anthropic | `ANTHROPIC_API_URL` | `ANTHROPIC_API_KEY` | `ANTHROPIC_MODEL` |
-| Google    | `GOOGLE_API_URL`    | `GOOGLE_API_KEY`    | `GOOGLE_MODEL`    |
-| Custom    | `CUSTOM_API_URL`    | `CUSTOM_API_KEY`    | `CUSTOM_MODEL`    |
-| Copilot   | *(set by LiteLLM)*  | *(set by LiteLLM)*  | `COPILOT_MODEL`   |
-
-These variables seed the registry only on the first run (when `models.json` does
-not exist yet); afterwards, edit the registry with `/model` instead.
-
-The **custom** provider speaks the OpenAI-compatible API, so it works with local
-servers (LM Studio, llama.cpp, vLLM, Ollama's OpenAI shim) and gateways. Google
-uses the Gemini (`google-genai`) SDK. For **GitHub Copilot** you only set
-`COPILOT_MODEL` — the URL and key point at the local LiteLLM gateway, which ludvart
-starts and configures for you (see [below](#more-on-github-copilot-via-litellm)).
-
-At startup ludvart verifies each registered model with a minimal request. If the
-registry is empty (and the wizard is skipped or non-interactive), ludvart runs as
-a plain relay.
+Switching to (or adding) a GitHub Copilot model launches its local gateway on
+demand. ludvart runs **one gateway at a time** — for the active Copilot model —
+and tears it down when you switch away or exit.
 
 
 ### More on GitHub Copilot (via LiteLLM)
@@ -310,8 +277,7 @@ without re-authorizing.
 Each request waits up to **`LUDVART_LLM_TIMEOUT`** seconds (default `30`). On a
 transient failure — a timeout, a dropped connection, a rate limit, or a `5xx`
 response — ludvart retries up to **`LUDVART_LLM_MAX_RETRIES`** times (default `2`,
-with exponential backoff). Both settings are read from the environment
-or `~/.ludvart/llm.conf`.
+with exponential backoff). Both settings are read from the environment.
 
 ### Context window
 
