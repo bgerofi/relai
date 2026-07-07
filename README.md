@@ -76,9 +76,12 @@ ludvart
 
 ## LLM configuration
 
-The first time you run `ludvart` without a configured LLM provider, it walks you
-through a short **interactive setup** that saves your choice to
-`~/.ludvart/llm.conf`:
+ludvart keeps every model you register in `~/.ludvart/models.json` — an array of
+registrations, each holding a provider, endpoint URL, API key, and model name.
+One entry is marked *active* (the model currently in use).
+
+The first time you run `ludvart` with an empty registry, it walks you through a
+short **interactive setup** that registers your first model:
 
 ```
 Select the API endpoint type:
@@ -92,7 +95,30 @@ Select the API endpoint type:
 For providers 1–4 it asks for the endpoint URL, API key (hidden), and model
 name. Option 5 (GitHub Copilot) runs GitHub's device-flow authorization and then
 lets you pick from the models your account can use — see
-[GitHub Copilot](#github-copilot-via-litellm) below.
+[GitHub Copilot](#more-on-github-copilot-via-litellm) below.
+
+Once at least one model is registered, you add and switch between models from the
+AI panel with the **`/model`** command (see [Managing models](#managing-models)).
+At startup ludvart verifies **every** registered model and marks the reachable
+ones as *available*.
+
+### Managing models
+
+Inside the AI panel, `/model` manages the registry:
+
+- `/model list` — list all registered models; the one in use and the ones that
+  passed verification are marked.
+- `/model add` — register a new model through guided prompts (endpoint type,
+  URL, API key, model name; the key is hidden as you type). For GitHub Copilot it
+  lists the models your subscription can use. The new model is verified before it
+  is saved and does not become the active one.
+- `/model use <n>|<name>` — switch to another registered model by its list number
+  or a substring of its name (only *available* models can be selected).
+- `/model remove <n>|<name>` — unregister a model (not the one currently in use).
+
+Switching to (or adding) a GitHub Copilot model launches its local gateway on
+demand. ludvart runs **one gateway at a time** — for the active Copilot model —
+and tears it down when you switch away or exit.
 
 
 ## Summoning the agent
@@ -213,10 +239,15 @@ modified.
 
 ### LLM Providers
 
-If you'd rather not deal with the interactive
-step — or you want to override what it saved — you can configure a provider
-directly with a triplet of variables (URL, key, model), either as environment
-variables or in `~/.ludvart/llm.conf`. Set the three variables for one provider:
+Model registrations live in `~/.ludvart/models.json` (managed by the wizard and
+`/model`). For backwards compatibility, if that file does not yet exist ludvart
+performs a **one-time migration**: it seeds the registry from a provider triplet
+(URL, key, model) read from the environment or the legacy `~/.ludvart/llm.conf`.
+Once the registry exists, `models.json` is the source of truth and these
+variables are no longer consulted for model selection.
+
+So to seed your first model non-interactively, set the three variables for one
+provider before the first run:
 
 | Provider  | URL                 | Key                 | Model             |
 |-----------|---------------------|---------------------|-------------------|
@@ -226,18 +257,18 @@ variables or in `~/.ludvart/llm.conf`. Set the three variables for one provider:
 | Custom    | `CUSTOM_API_URL`    | `CUSTOM_API_KEY`    | `CUSTOM_MODEL`    |
 | Copilot   | *(set by LiteLLM)*  | *(set by LiteLLM)*  | `COPILOT_MODEL`   |
 
-Environment variables take precedence over the config file, so exporting a value
-overrides the wizard's saved settings for that invocation.
+These variables seed the registry only on the first run (when `models.json` does
+not exist yet); afterwards, edit the registry with `/model` instead.
 
 The **custom** provider speaks the OpenAI-compatible API, so it works with local
 servers (LM Studio, llama.cpp, vLLM, Ollama's OpenAI shim) and gateways. Google
 uses the Gemini (`google-genai`) SDK. For **GitHub Copilot** you only set
 `COPILOT_MODEL` — the URL and key point at the local LiteLLM gateway, which ludvart
-starts and configures for you (see [below](#github-copilot-via-litellm)).
+starts and configures for you (see [below](#more-on-github-copilot-via-litellm)).
 
-At startup ludvart makes a minimal request to verify the provider is reachable. If
-no provider is configured (and the wizard is skipped or non-interactive), ludvart
-runs as a plain relay.
+At startup ludvart verifies each registered model with a minimal request. If the
+registry is empty (and the wizard is skipped or non-interactive), ludvart runs as
+a plain relay.
 
 
 ### More on GitHub Copilot (via LiteLLM)
@@ -258,19 +289,22 @@ Requirements and behavior:
   later runs, so the gateway starts non-interactively afterwards. (This uses
   GitHub's own OAuth, not `~/.netrc`.)
 
-The easiest way to set this up is the first-run wizard (option 5), which runs the
-device flow and lists the models your account can use (Copilot uses its own model
-ids, e.g. `gpt-4o`, `claude-opus-4.8`). Only the chosen model is stored:
+The easiest way to add Copilot is the first-run wizard (option 5) or `/model add`
+→ GitHub Copilot, which lists the models your account can use (Copilot uses its
+own model ids, e.g. `gpt-4o`, `claude-opus-4.8`). The chosen model is stored as a
+registration in `models.json`:
 
-```ini
-# ~/.ludvart/llm.conf
-COPILOT_MODEL=gpt-5.3-codex
+```jsonc
+// ~/.ludvart/models.json (one entry)
+{ "provider": "copilot", "model": "gpt-5.3-codex", "active": true }
 ```
 
-At startup, when no direct provider is configured but `COPILOT_MODEL` is set,
-ludvart authorizes (if needed), spawns the local LiteLLM gateway on loopback, and
-points its OpenAI-compatible client at it. The gateway is shut down when ludvart
-exits.
+You can register **several** Copilot models. ludvart spawns the local LiteLLM
+gateway on loopback only for the Copilot model that is currently active, points
+its OpenAI-compatible client at it, and shuts it down when you switch away or
+exit. The first device-flow authorization must be done in a terminal (the
+first-run wizard); once authorized, adding Copilot models from the panel works
+without re-authorizing.
 
 ### Timeouts and retries
 
