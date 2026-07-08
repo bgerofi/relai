@@ -11,6 +11,7 @@ foundation the AI overlay/agent will later read from.
 from __future__ import annotations
 
 import base64
+import contextlib
 import errno
 import fcntl
 import os
@@ -329,6 +330,10 @@ class Ludvart:
         # open; ``_mcp_started`` guards the one-off automatic discovery.
         self._mcp: McpManager | None = None
         self._mcp_started = False
+        # Internal profiling: per operation-type list of durations (seconds).
+        # Populated by ``_perf_timer`` around LLM requests and tool calls, and
+        # reported by the ``/perf summary`` / ``/perf dump`` panel commands.
+        self._perf: dict[str, list[float]] = {}
         # Private per-run scratch directory for files saved by ``fetch_url``.
         # Created lazily on first fetch (see ``_fetch_tmp_dir``) as a 0700
         # directory owned by this user, and removed wholesale when ``run``
@@ -991,6 +996,8 @@ class Ludvart:
             self._cmd_compact()
         elif cmd == "mcp_refresh":
             self._cmd_mcp_refresh()
+        elif cmd == "perf":
+            self._cmd_perf(args)
         elif cmd == "help":
             self._cmd_help()
         else:
@@ -1006,6 +1013,64 @@ class Ludvart:
         width = max(len(usage) for usage, _ in SLASH_COMMAND_HELP)
         for usage, desc in SLASH_COMMAND_HELP:
             panel.add_system(f"  {usage.ljust(width)}  {desc}")
+
+    def _cmd_perf(self, args: list[str]) -> None:
+        """Handle ``/perf [summary|dump]``: report internal operation timings.
+
+        Timings are collected for every major operation -- each LLM request
+        (``llm_request``) and each tool call (``tool:<name>``) -- and kept as a
+        per-type list of durations. ``summary`` reports min/avg/max per type;
+        ``dump`` prints the raw records. Defaults to ``summary``.
+        """
+        panel = self._panel
+        if panel is None:
+            return
+        sub = args[0] if args else "summary"
+        if sub == "summary":
+            self._perf_summary()
+        elif sub == "dump":
+            self._perf_dump()
+        else:
+            panel.add_system("Usage: /perf [summary|dump]")
+
+    def _perf_summary(self) -> None:
+        """Report min/avg/max duration (seconds) per recorded operation type."""
+        panel = self._panel
+        if panel is None:
+            return
+        if not self._perf:
+            panel.add_system("No performance records yet.")
+            return
+        panel.add_system("Performance summary (durations in seconds):")
+        name_w = max(max(len(op) for op in self._perf), len("operation"))
+        panel.add_system(
+            f"  {'operation'.ljust(name_w)}  {'n':>4}  "
+            f"{'min':>8}  {'avg':>8}  {'max':>8}"
+        )
+        for op in sorted(self._perf):
+            samples = self._perf[op]
+            n = len(samples)
+            lo = min(samples)
+            hi = max(samples)
+            avg = sum(samples) / n
+            panel.add_system(
+                f"  {op.ljust(name_w)}  {n:>4}  "
+                f"{lo:>8.3f}  {avg:>8.3f}  {hi:>8.3f}"
+            )
+
+    def _perf_dump(self) -> None:
+        """Dump the raw per-operation timing records (seconds) into the panel."""
+        panel = self._panel
+        if panel is None:
+            return
+        if not self._perf:
+            panel.add_system("No performance records yet.")
+            return
+        panel.add_system("Performance records (raw, durations in seconds):")
+        for op in sorted(self._perf):
+            samples = self._perf[op]
+            joined = ", ".join(f"{d:.3f}" for d in samples)
+            panel.add_system(f"  {op} ({len(samples)}): {joined}")
 
     def _cmd_init_helpers(self) -> None:
         """Handle ``/init_helpers``: install or repair ~/.ludvart/bin/ludvart_helper.
@@ -1673,9 +1738,10 @@ class Ludvart:
             {"role": "user", "content": instruction},
         ]
         try:
-            turn = self.llm.converse(
-                messages, tools=None, max_tokens=self.SUMMARY_MAX_TOKENS
-            )
+            with self._perf_timer("llm_request"):
+                turn = self.llm.converse(
+                    messages, tools=None, max_tokens=self.SUMMARY_MAX_TOKENS
+                )
         except Exception as exc:  # never crash the ask; just skip compaction
             if self._panel is not None:
                 self._panel.add_info(f"[ludvart] context compaction failed: {exc}")
@@ -1947,12 +2013,13 @@ class Ludvart:
                     panel.activity = "Thinking"
                     panel.interim = _compose()
                 last_stream = ""
-                turn = self.llm.converse(
-                    [system, *self._build_llm_context()],
-                    tools=tools,
-                    max_tokens=self.REPLY_MAX_TOKENS,
-                    on_text=_on_text,
-                )
+                with self._perf_timer("llm_request"):
+                    turn = self.llm.converse(
+                        [system, *self._build_llm_context()],
+                        tools=tools,
+                        max_tokens=self.REPLY_MAX_TOKENS,
+                        on_text=_on_text,
+                    )
                 self._llm_history.append(self._neutral_assistant(turn))
                 if turn.usage is not None:
                     pct = turn.usage.context_percent()
@@ -1972,7 +2039,8 @@ class Ludvart:
                     if self._panel is not None:
                         self._panel.activity = f"Calling {call.name}"
                         self._panel.interim = _compose()
-                    output = self._run_tool(call)
+                    with self._perf_timer(f"tool:{call.name}"):
+                        output = self._run_tool(call)
                     self._llm_history.append(
                         self._neutral_tool_result(call, output)
                     )
@@ -2351,6 +2419,19 @@ class Ludvart:
                 val = val[:57] + "\u2026"
             parts.append(f"{key}={val!r}")
         return f"\u2192 {call.name}(" + ", ".join(parts) + ")"
+
+    def _perf_add(self, op: str, seconds: float) -> None:
+        """Record one timing sample (seconds) for operation type ``op``."""
+        self._perf.setdefault(op, []).append(seconds)
+
+    @contextlib.contextmanager
+    def _perf_timer(self, op: str):
+        """Time the wrapped block and record it under operation type ``op``."""
+        start = time.perf_counter()
+        try:
+            yield
+        finally:
+            self._perf_add(op, time.perf_counter() - start)
 
     def _run_tool(self, call: "ToolCall") -> str:
         """Execute a model-requested tool and return its result text."""

@@ -378,6 +378,7 @@ SLASH_COMMANDS: dict[str, list[str]] = {
     "init_helpers": [],
     "mcp_refresh": [],
     "model": ["add", "list", "remove", "use"],
+    "perf": ["dump", "summary"],
     "sessions": ["list", "load", "new"],
 }
 
@@ -407,6 +408,12 @@ SLASH_COMMAND_HELP: list[tuple[str, str]] = [
     ("/model add", "Register a new model endpoint (guided prompts, then verify)."),
     ("/model use <n>|<model>", "Switch to another registered, available model."),
     ("/model remove <n>|<model>", "Unregister a model (not the one in use)."),
+    (
+        "/perf summary",
+        "Report min/avg/max timing per operation type (LLM requests, tool "
+        "calls) for this session.",
+    ),
+    ("/perf dump", "Dump the raw per-operation timing records into the panel."),
 ]
 
 
