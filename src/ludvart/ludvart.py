@@ -1708,6 +1708,110 @@ class Ludvart:
         deliver(self._ask_result)
         self._render_split()
 
+
+    #: Breadcrumb that replaces the screen snapshot of superseded user turns in
+    #: the model-facing context. Only the most recent turn keeps its full
+    #: <screenContext>; older ones are collapsed to a breadcrumb line to save
+    #: context (the live screen is re-fetchable via tools, and the exact past
+    #: snapshot via get_past_snapshot(timestamp)). The stored log is untouched.
+    #: This bare form is only a fallback for a snapshot missing its timestamp;
+    #: the normal breadcrumb carries the ts (see :meth:`_screen_breadcrumb`).
+    _SCREEN_PLACEHOLDER = "[screen omitted; superseded by a newer snapshot]"
+
+    #: Matches a ``<screenContext>`` open tag with any (or no) attributes.
+    _SCREEN_OPEN_RE = re.compile(r"<screenContext(?:\s[^>]*)?>")
+    #: Extracts the ``ts="..."`` timestamp attribute from an open tag.
+    _SCREEN_TS_RE = re.compile(r'ts="([^"]*)"')
+
+    @staticmethod
+    def _utc_ns_timestamp() -> str:
+        """Return the current UTC time as ``YYYY-MM-DDThh:mm:ss.<nanoseconds>``.
+
+        Used to stamp each screen snapshot (see :meth:`_ask_llm`) with a unique,
+        human-readable key. The nanosecond field comes from
+        :func:`time.time_ns` so the value is precise enough to be unique within
+        a session, while the date/time portion stays readable. The same string
+        is later echoed in the breadcrumb and accepted by ``get_past_snapshot``.
+        """
+        ns = time.time_ns()
+        secs, frac_ns = divmod(ns, 1_000_000_000)
+        base = time.strftime("%Y-%m-%dT%H:%M:%S", time.gmtime(secs))
+        return f"{base}.{frac_ns:09d}"
+
+    @classmethod
+    def _screen_breadcrumb(cls, ts: str | None) -> str:
+        """The line that replaces a stripped snapshot, keyed by its timestamp."""
+        if not ts:
+            return cls._SCREEN_PLACEHOLDER
+        return (
+            f"[screen from {ts} omitted; "
+            f"queryable by get_past_snapshot({ts})]"
+        )
+
+    @classmethod
+    def _strip_old_screenshots(cls, history: list[dict]) -> list[dict]:
+        """Return a copy of the neutral log keeping only the newest screenshot.
+
+        Every user turn embeds a ``<screenContext ts="...">...</screenContext>``
+        block (see :meth:`_ask_llm`). Older snapshots are stale -- the screen
+        changes every turn -- yet each is thousands of tokens, so retaining them
+        all bloats the context and accelerates compaction. Here we keep the
+        *last* user turn's screenshot verbatim and collapse the screen block of
+        every earlier user turn to a timestamped breadcrumb (see
+        :meth:`_screen_breadcrumb`), leaving the ``<userRequest>`` (and all
+        non-user messages) untouched. The breadcrumb keeps each snapshot's
+        timestamp so the model can fetch the full snapshot back with
+        ``get_past_snapshot(timestamp)``. This only reshapes the per-request
+        render; ``self._llm_history`` and the persisted session keep the full
+        snapshots.
+        """
+        close_tag = "</screenContext>"
+
+        def open_match(content: str):
+            return cls._SCREEN_OPEN_RE.search(content)
+
+        def has_screen(msg: dict) -> bool:
+            return (
+                isinstance(msg, dict)
+                and msg.get("role") == "user"
+                and isinstance(msg.get("content"), str)
+                and open_match(msg["content"]) is not None
+                and close_tag in msg["content"]
+            )
+
+        last = -1
+        for i, msg in enumerate(history):
+            if has_screen(msg):
+                last = i
+        if last < 0:
+            return list(history)
+
+        out: list[dict] = []
+        for i, msg in enumerate(history):
+            if i != last and has_screen(msg):
+                content = msg["content"]
+                m = open_match(content)
+                open_tag = m.group(0)
+                ts_m = cls._SCREEN_TS_RE.search(open_tag)
+                ts = ts_m.group(1) if ts_m else None
+                start = m.start()
+                end = content.find(close_tag) + len(close_tag)
+                trimmed = (
+                    content[:start]
+                    + open_tag
+                    + "\n"
+                    + cls._screen_breadcrumb(ts)
+                    + "\n"
+                    + close_tag
+                    + content[end:]
+                )
+                new_msg = dict(msg)
+                new_msg["content"] = trimmed
+                out.append(new_msg)
+            else:
+                out.append(msg)
+        return out
+
     def _build_llm_context(self) -> list[dict]:
         """Render the neutral log into the active client's native messages.
 
@@ -1715,11 +1819,16 @@ class Ludvart:
         shaping lives on the client (letting clients coexist and be swapped
         mid-conversation). Lightweight test stubs without ``build_context`` get
         the raw neutral log, which is close enough for their assertions.
+
+        Before rendering, superseded screen snapshots are stripped (see
+        :meth:`_strip_old_screenshots`) so only the newest ``<screenContext>``
+        is sent to the model.
         """
+        history = self._strip_old_screenshots(self._llm_history)
         build = getattr(self.llm, "build_context", None)
         if build is None:
-            return list(self._llm_history)
-        return build(self._llm_history)
+            return list(history)
+        return build(history)
 
     @staticmethod
     def _neutral_assistant(turn) -> dict:
@@ -1763,8 +1872,14 @@ class Ludvart:
         until the model returns a plain text answer.
         """
         screen_text = self.snapshot_text()
+        # Stamp each snapshot with a UTC timestamp (nanosecond precision) so it
+        # can be addressed later. When older snapshots are stripped from the
+        # model-facing context (see :meth:`_strip_old_screenshots`) the
+        # timestamp survives in the breadcrumb, letting the model fetch the full
+        # snapshot back via the ``get_past_snapshot`` tool.
+        snapshot_ts = self._utc_ns_timestamp()
         user_content = (
-            "<screenContext>\n"
+            f'<screenContext ts="{snapshot_ts}">\n'
             f"{screen_text}\n"
             "</screenContext>\n"
             f"<userRequest>\n{question}\n</userRequest>"
@@ -2048,6 +2163,38 @@ class Ludvart:
                 },
             ),
             ToolSpec(
+                name="get_past_snapshot",
+                description=(
+                    "Return the exact terminal screen snapshot that was captured "
+                    "at a previous turn, identified by its UTC timestamp. Each "
+                    "user turn embeds a <screenContext ts=\"...\"> snapshot; once "
+                    "superseded, older snapshots are removed from your context "
+                    "and replaced by a breadcrumb line that keeps the timestamp "
+                    "(e.g. '[screen from <TS> omitted; queryable by "
+                    "get_past_snapshot(<TS>)]'). Call this with that <TS> to get "
+                    "the full snapshot back. Unlike capture_screen_history (which "
+                    "reads flattened scrollback), this returns a consistent, "
+                    "point-in-time rectangular screenshot -- useful for full-screen "
+                    "TUI applications whose past state cannot be reconstructed "
+                    "from scrollback. Pass the timestamp exactly as shown in the "
+                    "breadcrumb."
+                ),
+                input_schema={
+                    "type": "object",
+                    "properties": {
+                        "timestamp": {
+                            "type": "string",
+                            "description": (
+                                "The UTC timestamp of the desired snapshot, "
+                                "exactly as it appears in the breadcrumb, e.g. "
+                                "'2026-07-06T17:28:54.123456789'."
+                            ),
+                        },
+                    },
+                    "required": ["timestamp"],
+                },
+            ),
+            ToolSpec(
                 name="b64_encode",
                 description=(
                     "Encode UTF-8 text to base64 natively (no shell, no "
@@ -2200,6 +2347,8 @@ class Ludvart:
             return self._tool_inject_input(call.input)
         if call.name == "capture_screen_history":
             return self._tool_capture_screen_history(call.input)
+        if call.name == "get_past_snapshot":
+            return self._tool_get_past_snapshot(call.input)
         if call.name == "b64_encode":
             return self._tool_b64_encode(call.input)
         if call.name == "b64_decode":
@@ -2753,6 +2902,62 @@ class Ludvart:
             return True  # never hang the tool on a status-check failure
         verdict = reply.strip().upper()
         return "RUNNING" not in verdict
+
+    def _snapshot_by_timestamp(self, ts: str):
+        """Return the snapshot body stored under timestamp ``ts``, or ``None``.
+
+        Scans the *unstripped* neutral log (``self._llm_history``) -- not the
+        model-facing context, which may have had this snapshot collapsed to a
+        breadcrumb -- for the user turn whose ``<screenContext ts="...">`` open
+        tag carries ``ts`` and returns the text between the open and close tags
+        (the raw screenshot). Returns ``None`` if no snapshot has that
+        timestamp. This is the backing lookup for the ``get_past_snapshot`` tool.
+        """
+        close_tag = "</screenContext>"
+        for msg in self._llm_history:
+            if not (
+                isinstance(msg, dict)
+                and msg.get("role") == "user"
+                and isinstance(msg.get("content"), str)
+            ):
+                continue
+            content = msg["content"]
+            m = self._SCREEN_OPEN_RE.search(content)
+            if m is None or close_tag not in content:
+                continue
+            ts_m = self._SCREEN_TS_RE.search(m.group(0))
+            if ts_m is None or ts_m.group(1) != ts:
+                continue
+            start = m.end()
+            end = content.find(close_tag, start)
+            if end < 0:
+                continue
+            return content[start:end].strip("\n")
+        return None
+
+    def _tool_get_past_snapshot(self, args: dict) -> str:
+        """Return a stored past screen snapshot addressed by its timestamp."""
+        ts = args.get("timestamp")
+        if not isinstance(ts, str) or not ts.strip():
+            return (
+                "[ludvart] get_past_snapshot: 'timestamp' must be a non-empty "
+                "string. Provide a valid snapshot timestamp exactly as shown in "
+                "a breadcrumb."
+            )
+        ts = ts.strip()
+        snapshot = self._snapshot_by_timestamp(ts)
+        if snapshot is None:
+            return (
+                f"[ludvart] get_past_snapshot: no snapshot found for timestamp "
+                f"{ts!r}. A valid snapshot timestamp is needed -- pass one "
+                "exactly as it appears in a breadcrumb."
+            )
+        return (
+            f"Terminal screen snapshot captured at {ts}:\n"
+            f'<screenContext ts="{ts}">\n'
+            f"{snapshot}\n"
+            "</screenContext>"
+        )
 
     def _tool_capture_screen_history(self, args: dict) -> str:
         """Return a slice of the scrollback history for the model.
