@@ -23,9 +23,10 @@ set; if several are configured, one is chosen by a fixed precedence
 (custom > google > anthropic > openai).
 
 Two optional settings tune request behaviour (env or ``~/.ludvart/llm.conf``):
-``LUDVART_LLM_TIMEOUT`` (seconds per request, default 30) and
-``LUDVART_LLM_MAX_RETRIES`` (retries on timeout / dropped connection / rate limit /
-5xx, default 2). ludvart owns the retry loop so it can report each retry in the UI.
+``LUDVART_LLM_TIMEOUT`` (seconds per request, default 120 -- applied as the read
+timeout, with a short independent connect timeout) and ``LUDVART_LLM_MAX_RETRIES``
+(retries on timeout / dropped connection / rate limit / 5xx, default 2). ludvart
+owns the retry loop so it can report each retry in the UI.
 """
 
 from __future__ import annotations
@@ -38,7 +39,14 @@ from dataclasses import dataclass, field
 from typing import Any, Callable, Sequence
 
 #: How long (seconds) to wait on any single LLM request.
-DEFAULT_TIMEOUT = 30.0
+DEFAULT_TIMEOUT = 120.0
+
+#: Connect timeout (seconds) used when it can be set independently of the
+#: overall/read timeout. Kept short so an unreachable endpoint fails fast even
+#: though the read timeout is long enough to tolerate slow reasoning models
+#: (which can take a while to emit their first token, especially through the
+#: local Copilot gateway).
+DEFAULT_CONNECT_TIMEOUT = 15.0
 
 #: How many times to retry a transient LLM failure (timeout, dropped
 #: connection, rate limit, 5xx) before giving up.
@@ -775,9 +783,27 @@ def _first_positive_int(obj: Any, *names: str) -> int:
     return 0
 
 
+def _httpx_timeout(read_timeout: float) -> Any:
+    """Build an ``httpx.Timeout`` with a short connect but a long read timeout.
+
+    Passing a single float to the OpenAI/Anthropic SDKs applies it to *every*
+    phase, including ``connect`` -- so a healthy but slow model (a long
+    time-to-first-token, common for reasoning models behind the Copilot gateway)
+    is indistinguishable from an unreachable endpoint, and both fail at the same
+    short deadline. Splitting them lets a dead endpoint fail fast (``connect``)
+    while a slow generation is tolerated (``read``/``write``/``pool``). Returns
+    the bare float if ``httpx`` is somehow unavailable.
+    """
+    try:
+        import httpx
+    except ImportError:  # pragma: no cover - httpx ships with the SDKs
+        return read_timeout
+    connect = min(read_timeout, DEFAULT_CONNECT_TIMEOUT)
+    return httpx.Timeout(read_timeout, connect=connect)
+
+
 class LLMClient:
     """Base class: a client that can complete a chat and verify connectivity."""
-
     def __init__(self, config: ProviderConfig, timeout: float = DEFAULT_TIMEOUT,
                  max_retries: int = DEFAULT_MAX_RETRIES) -> None:
         self.config = config
@@ -1044,9 +1070,11 @@ class OpenAIClient(LLMClient):
         if base_url.endswith("/chat/completions"):
             base_url = base_url[: -len("/chat/completions")]
         # ludvart owns retries (see LLMClient._request) so it can report them; tell
-        # the SDK not to retry on its own.
+        # the SDK not to retry on its own. A split connect/read timeout keeps a
+        # dead endpoint failing fast while tolerating slow (reasoning) models.
         self._client = OpenAI(
-            api_key=config.api_key, base_url=base_url, timeout=timeout, max_retries=0
+            api_key=config.api_key, base_url=base_url,
+            timeout=_httpx_timeout(timeout), max_retries=0,
         )
 
     def detect_context_window(self) -> int:
@@ -1263,9 +1291,11 @@ class AnthropicClient(LLMClient):
                 base_url = base_url[: -len(suffix)]
                 break
         # ludvart owns retries (see LLMClient._request) so it can report them; tell
-        # the SDK not to retry on its own.
+        # the SDK not to retry on its own. A split connect/read timeout keeps a
+        # dead endpoint failing fast while tolerating slow (reasoning) models.
         self._client = Anthropic(
-            api_key=config.api_key, base_url=base_url, timeout=timeout, max_retries=0
+            api_key=config.api_key, base_url=base_url,
+            timeout=_httpx_timeout(timeout), max_retries=0,
         )
 
     def detect_context_window(self) -> int:

@@ -274,7 +274,10 @@ without re-authorizing.
 
 ### Timeouts and retries
 
-Each request waits up to **`LUDVART_LLM_TIMEOUT`** seconds (default `30`). On a
+Each request waits up to **`LUDVART_LLM_TIMEOUT`** seconds (default `120`). This
+is applied as the *read* timeout, with a short independent connect timeout, so a
+slow model that takes a while to start streaming (common for reasoning models
+behind the Copilot gateway) is not mistaken for an unreachable endpoint. On a
 transient failure — a timeout, a dropped connection, a rate limit, or a `5xx`
 response — ludvart retries up to **`LUDVART_LLM_MAX_RETRIES`** times (default `2`,
 with exponential backoff). Both settings are read from the environment.
