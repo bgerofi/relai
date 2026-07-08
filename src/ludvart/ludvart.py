@@ -2081,7 +2081,14 @@ class Ludvart:
                     "or (2) send keystrokes (including control characters) to an "
                     "interactive program such as vim, less, a REPL or a TUI. This "
                     "is the way to actually DO things in the terminal; prefer it "
-                    "over merely telling the user what to type."
+                    "over merely telling the user what to type. "
+                    "IMPORTANT: keep each call's 'text' small -- at most about "
+                    "2 KB. Larger payloads (e.g. a long base64 blob or a big file "
+                    "body) often fail to be generated and arrive EMPTY, which "
+                    "wastes a call; split long content into several sequential "
+                    "inject_input calls of <=2 KB each (submit=false on the "
+                    "intermediate parts, then submit=true -- or a trailing "
+                    "newline -- on the final one to execute)."
                 ),
                 input_schema={
                     "type": "object",
@@ -2100,7 +2107,11 @@ class Ludvart:
                                 "a literal backslash. Raw control BYTES do not "
                                 "survive here -- always express control keys with "
                                 "these escapes. A trailing newline (or "
-                                "submit=true) is needed to run a shell command."
+                                "submit=true) is needed to run a shell command. "
+                                "Keep this under ~2 KB per call; for longer "
+                                "content, split it across several sequential "
+                                "inject_input calls (each <=2 KB) instead of one "
+                                "large one, which may otherwise arrive empty."
                             ),
                         },
                         "submit": {
