@@ -25,6 +25,11 @@ def _systems(r):
     return [t for kind, t in r._panel.messages if kind == "system"]
 
 
+def _start_llm_request(r):
+    r._panel.thinking = True
+    r._llm_request_in_flight = True
+
+
 def test_draft_survives_toggle():
     r = _make_ludvart()
     r._panel.editor.insert("half typed question")
@@ -61,8 +66,7 @@ def test_toggle_closes_immediately_when_idle():
 
 def test_toggle_prompts_during_llm_request():
     r = _make_ludvart()
-    r._panel.thinking = True
-    r._deliver = r._deliver_reply  # an LLM ask is in flight
+    _start_llm_request(r)
     r._request_toggle_close()
     assert r._panel_closing is False
     assert r._confirm_close is True
@@ -75,7 +79,7 @@ def test_toggle_prompts_during_llm_request():
 def test_toggle_no_prompt_for_deterministic_action():
     r = _make_ludvart()
     r._panel.thinking = True
-    r._deliver = r._deliver_system  # deterministic action, not an LLM ask
+    r._deliver = r._deliver_system  # action is busy, but no LLM ask is active
     r._request_toggle_close()
     assert r._panel_closing is True
     assert r._confirm_close is False
@@ -84,8 +88,7 @@ def test_toggle_no_prompt_for_deterministic_action():
 
 def test_confirm_yes_cancels_and_closes():
     r = _make_ludvart()
-    r._panel.thinking = True
-    r._deliver = r._deliver_reply
+    _start_llm_request(r)
     r._request_toggle_close()
     # Answer 'y' via the input router (confirm state intercepts the keystroke).
     r._panel_input(b"y")
@@ -99,8 +102,7 @@ def test_confirm_yes_cancels_and_closes():
 
 def test_confirm_no_keeps_panel_open():
     r = _make_ludvart()
-    r._panel.thinking = True
-    r._deliver = r._deliver_reply
+    _start_llm_request(r)
     r._request_toggle_close()
     r._panel_input(b"n")
     assert r._panel_closing is False
@@ -113,8 +115,7 @@ def test_confirm_no_keeps_panel_open():
 
 def test_confirm_ignores_unrelated_keys():
     r = _make_ludvart()
-    r._panel.thinking = True
-    r._deliver = r._deliver_reply
+    _start_llm_request(r)
     r._request_toggle_close()
     r._panel_input(b"x")  # not y/n -> stays pending
     assert r._confirm_close is True
@@ -127,8 +128,7 @@ def test_confirm_ignores_unrelated_keys():
 def test_confirm_prompt_renders_on_bottom_input_line():
     r = _make_ludvart()
     r._panel.editor.insert("draft not yet sent")
-    r._panel.thinking = True
-    r._deliver = r._deliver_reply
+    _start_llm_request(r)
     r._request_toggle_close()
     rows = r._panel.render(height=8, cols=80)
     bottom = rows[-1].decode("utf-8", "replace")
@@ -137,6 +137,23 @@ def test_confirm_prompt_renders_on_bottom_input_line():
     assert "ludvart>" not in bottom
     assert "draft not yet sent" not in bottom
     print("confirm question renders on the bottom input line: OK")
+
+
+def test_all_panel_close_keys_confirm_an_llm_request():
+    for name, keys in (
+        ("Ctrl-O", [b"\x0f"]),
+        ("Esc", [b"\x1b"]),
+        ("Ctrl-G a", [b"\x07", b"a"]),
+        ("Ctrl-G a (one read)", [b"\x07a"]),
+    ):
+        r = _make_ludvart()
+        _start_llm_request(r)
+        for key in keys:
+            r._panel_input(key)
+        assert r._panel_closing is False, name
+        assert r._confirm_close is True, name
+        assert r._panel.confirm_prompt.endswith("(y/n)"), name
+    print("Ctrl-O, Esc, and Ctrl-G a all confirm before closing: OK")
 
 
 def main():
@@ -149,6 +166,7 @@ def main():
     test_confirm_no_keeps_panel_open()
     test_confirm_ignores_unrelated_keys()
     test_confirm_prompt_renders_on_bottom_input_line()
+    test_all_panel_close_keys_confirm_an_llm_request()
     print("\nALL panel toggle tests passed.")
 
 

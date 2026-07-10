@@ -325,6 +325,9 @@ class Ludvart:
         self._ask_thread: threading.Thread | None = None
         self._ask_result = ""
         self._ask_done = threading.Event()
+        # True only while a user/model LLM ask is running. Background actions
+        # share the worker plumbing but do not need a close-confirmation prompt.
+        self._llm_request_in_flight = False
         # Set to request that the in-flight background ask abandon itself: the
         # agent loop checks it between steps (and while streaming) so a closed
         # panel does not keep issuing requests or firing tool calls.
@@ -883,7 +886,7 @@ class Ludvart:
         panel = self._panel
         if panel is None:
             return
-        if panel.thinking and self._deliver == self._deliver_reply:
+        if self._llm_request_in_flight:
             if not self._confirm_close:
                 self._confirm_close = True
                 panel.confirm_prompt = (
@@ -919,6 +922,7 @@ class Ludvart:
         more tool calls. Its result is ignored (see :meth:`_finish_ask`).
         """
         self._ask_cancel.set()
+        self._llm_request_in_flight = False
         panel = self._panel
         if panel is not None:
             panel.thinking = False
@@ -1686,6 +1690,7 @@ class Ludvart:
         panel.activity = "Thinking"
         panel.tick = 0
         self._deliver = self._deliver_reply
+        self._llm_request_in_flight = True
         self._render_split()  # show the question and the spinner immediately
 
         ask = self._ai_ask
@@ -1863,6 +1868,7 @@ class Ludvart:
         # A request that finished on its own resolves any pending close prompt.
         self._confirm_close = False
         panel.confirm_prompt = ""
+        self._llm_request_in_flight = False
         # If it was cancelled, drop the result silently (the panel is closing).
         if self._ask_cancel.is_set():
             panel.thinking = False
