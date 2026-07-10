@@ -175,6 +175,7 @@ def _activate_registry(models: list[Registration]) -> ModelManager | None:
         idx = active_index(models)
         assert idx is not None
         active = models[idx]
+        saved_api_mode = active.get("api_mode")
         backend: Backend | None = None
         checking = False
         # Whether a "starting the ... gateway..." progress line is still open
@@ -214,6 +215,8 @@ def _activate_registry(models: list[Registration]) -> ModelManager | None:
             sys.stderr.write("ludvart: fix the configuration or pass --no-llm.\n")
             sys.exit(2)
         sys.stderr.write("ok\n")
+        if active.get("api_mode") != saved_api_mode:
+            save_models(models)
         available = _verify_others(models, idx)
         available[idx] = True
         return ModelManager(models, available, backend.client, backend.gateway)

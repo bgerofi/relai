@@ -43,16 +43,8 @@ fi
 export VIRTUAL_ENV="$PWD/.venv"
 VENV_PY="$VIRTUAL_ENV/bin/python"
 
-echo "==> Installing ludvart (editable) with dev tools (pytest) and dependencies"
-uv pip install --python "$VENV_PY" -e ".[dev]"
-
-echo "==> Installing the LiteLLM gateway (enables the GitHub Copilot endpoint)"
-# Optional feature: ludvart works with the other providers without it, so a
-# failure here warns but does not abort the whole setup.
-if ! uv pip install --python "$VENV_PY" "litellm[proxy]"; then
-    echo "warning: could not install litellm[proxy]; the GitHub Copilot gateway" >&2
-    echo "         option will be unavailable (other providers still work)." >&2
-fi
+echo "==> Installing ludvart (editable) with dev tools and the Copilot gateway"
+uv pip install --python "$VENV_PY" -e ".[dev,copilot]"
 
 echo "==> Verifying installation"
 if ! "$VENV_PY" -c "import ludvart, ludvart.__main__" >/dev/null 2>&1; then

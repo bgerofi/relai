@@ -14,6 +14,9 @@ sys.path.insert(0, str(Path(__file__).resolve().parents[1] / "src"))
 
 from ludvart import backend, models as reg  # noqa: E402
 
+_BUILD_BACKEND = backend.build_backend
+_VERIFY_BACKEND = backend.verify_backend
+
 
 class _FakeClient:
     def __init__(self, name="openai", ok=True):
@@ -34,6 +37,12 @@ def _install_fakes(monkey_ok=True):
 
     backend.build_backend = fake_build
     backend.verify_backend = lambda b: b.client.verify()
+
+
+def teardown_module():
+    """Restore production functions after this module's global test doubles."""
+    backend.build_backend = _BUILD_BACKEND
+    backend.verify_backend = _VERIFY_BACKEND
 
 
 def _reg(provider="openai", model="m", active=False, ok=True):

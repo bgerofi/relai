@@ -15,10 +15,10 @@ setup wizard); building a Copilot backend when unauthorized raises.
 
 from __future__ import annotations
 
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
 from typing import Callable, TYPE_CHECKING
 
-from .llm import LLMClient, build_client, copilot_provider_config
+from .llm import LLMClient, LLMError, build_client, copilot_provider_config
 from .models import (
     Registration,
     active_index,
@@ -43,6 +43,7 @@ class Backend:
 
     client: LLMClient
     gateway: "CopilotGateway | None" = None
+    registration: Registration | None = None
 
     def stop(self) -> None:
         """Stop the gateway, if any. Safe to call more than once."""
@@ -68,8 +69,33 @@ def build_backend(reg: Registration, *, status: StatusFn | None = None) -> Backe
 
 
 def verify_backend(backend: Backend) -> None:
-    """Confirm the backend's client works (raises on failure)."""
-    backend.client.verify()
+    """Confirm the backend's client works, selecting Responses when required."""
+    try:
+        backend.client.verify()
+    except LLMError as exc:
+        # Copilot's model list includes Responses-only models. LiteLLM gives a
+        # stable, specific rejection when one reaches Chat Completions; retry it
+        # through the same gateway with the Responses wire client instead.
+        if (
+            backend.gateway is None
+            or backend.client.config.api_mode == "responses"
+            or "not accessible via the /chat/completions endpoint" not in str(exc)
+        ):
+            raise
+        from .gateway import CopilotGateway, GATEWAY_API_KEY
+
+        old_gateway = backend.gateway
+        old_gateway.stop()
+        gateway = CopilotGateway(old_gateway.model, api_mode="responses")
+        gateway.start()
+        config = copilot_provider_config(
+            gateway.base_url, gateway.litellm_model, GATEWAY_API_KEY
+        )
+        backend.gateway = gateway
+        backend.client = build_client(replace(config, api_mode="responses"))
+        backend.client.verify()
+        if backend.registration is not None:
+            backend.registration["api_mode"] = "responses"
 
 
 def _build_copilot(reg: Registration, status: StatusFn | None) -> Backend:
@@ -92,14 +118,15 @@ def _build_copilot(reg: Registration, status: StatusFn | None) -> Backend:
             "GitHub Copilot isn't authorized yet; run `ludvart` in a terminal "
             "and add the Copilot model through the setup wizard once"
         )
-    gateway = CopilotGateway(model)
+    api_mode = str(reg.get("api_mode") or "chat")
+    gateway = CopilotGateway(model, api_mode=api_mode)
     if status is not None:
         status(f"starting the GitHub Copilot gateway (model {model!r})...")
     gateway.start()
     config = copilot_provider_config(
         gateway.base_url, gateway.litellm_model, GATEWAY_API_KEY
     )
-    return Backend(build_client(config), gateway)
+    return Backend(build_client(replace(config, api_mode=api_mode)), gateway, reg)
 
 
 class ModelManager:

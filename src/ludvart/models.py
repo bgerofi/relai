@@ -12,6 +12,7 @@ old single-provider ``llm.conf`` did, plus which one is currently active:
         "api_key": "sk-...",          # empty for copilot (the gateway supplies it)
         "model": "gpt-4o",
         "context_window": 0,           # 0 = auto-detect / use the fallback table
+        "api_mode": "chat",           # chat | responses (Copilot gateway wire API)
         "active": true                 # exactly one entry should be active
       },
       ...
@@ -89,12 +90,16 @@ def _coerce(raw: Any) -> Registration | None:
         ctx = int(raw.get("context_window") or 0)
     except (TypeError, ValueError):
         ctx = 0
+    api_mode = raw.get("api_mode")
+    if api_mode not in ("chat", "responses"):
+        api_mode = "chat"
     return {
         "provider": provider,
         "api_url": str(raw.get("api_url") or ""),
         "api_key": str(raw.get("api_key") or ""),
         "model": model,
         "context_window": ctx,
+        "api_mode": api_mode,
         "active": bool(raw.get("active")),
     }
 
@@ -231,6 +236,7 @@ def registration_to_config(reg: Registration) -> ProviderConfig:
         api_key=str(reg.get("api_key") or ""),
         model=reg["model"],
         context_window=int(reg.get("context_window") or 0),
+        api_mode=str(reg.get("api_mode") or "chat"),
     )
 
 

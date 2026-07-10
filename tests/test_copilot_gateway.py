@@ -10,6 +10,7 @@ Run:
         && python tests/test_copilot_gateway.py
 """
 
+import json
 import os
 import stat
 import tempfile
@@ -98,6 +99,26 @@ def test_gateway_model_and_url(tmp):
     assert gw.base_url == "http://127.0.0.1:12345"
     assert gw.litellm_model == "github_copilot/gpt-4o"
     print("gateway model/url: OK")
+
+
+def test_responses_gateway_writes_litellm_mode_config(tmp, monkeypatch_cli):
+    monkeypatch_cli(_make_cli(tmp, _FAKE_SERVER))
+    gw = CopilotGateway(
+        "gpt-5.6-terra", api_mode="responses", log_path=os.path.join(tmp, "gw.log")
+    )
+    gw.start(timeout=15)
+    try:
+        assert gw._config_path is not None
+        with open(gw._config_path, encoding="utf-8") as config_file:
+            config = json.load(config_file)
+        deployment = config["model_list"][0]
+        assert deployment["model_info"]["mode"] == "responses"
+        assert deployment["litellm_params"]["model"] == gw.litellm_model
+    finally:
+        config_path = gw._config_path
+        gw.stop()
+    assert config_path is not None and not os.path.exists(config_path)
+    print("Responses gateway config: OK")
 
 
 def test_gateway_start_and_stop(tmp, monkeypatch_cli):
@@ -216,6 +237,7 @@ def _run():
     tests = [
         test_config_helpers,
         test_gateway_model_and_url,
+        test_responses_gateway_writes_litellm_mode_config,
         test_gateway_start_and_stop,
         test_gateway_survives_worker_thread,
         test_gateway_start_failure,

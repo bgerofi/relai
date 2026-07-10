@@ -413,6 +413,9 @@ class ProviderConfig:
     model: str
     # Model context window in tokens (0 = unknown; set via *_CONTEXT_WINDOW).
     context_window: int = 0
+    # Wire API for OpenAI-compatible endpoints. Copilot's Responses-only models
+    # use ``responses``; all ordinary providers retain ``chat``.
+    api_mode: str = "chat"
 
 
 # Precedence when more than one provider is fully configured.
@@ -1271,6 +1274,123 @@ class OpenAIClient(LLMClient):
         }
 
 
+class ResponsesClient(OpenAIClient):
+    """OpenAI-compatible client using the Responses API.
+
+    GitHub Copilot exposes some models only on ``/responses``. The neutral
+    history remains unchanged; this client translates its chat-like entries to
+    OpenAI Responses input items at the request boundary.
+    """
+
+    def complete(self, messages: Sequence[Message], max_tokens: int = 1024) -> str:
+        turn = self._request(
+            lambda: self._responses_turn(
+                self._client.responses.create(
+                    model=self.config.model,
+                    input=self._responses_input(messages),
+                    max_output_tokens=max_tokens,
+                )
+            )
+        )
+        self._last_usage = turn.usage
+        return turn.text
+
+    def _prepare_converse(
+        self,
+        messages: Sequence[Message],
+        tools: Sequence[ToolSpec] | None,
+        max_tokens: int,
+    ) -> Any:
+        request: dict = {
+            "model": self.config.model,
+            "input": self._responses_input(messages),
+            "max_output_tokens": max_tokens,
+        }
+        if tools:
+            request["tools"] = [
+                {
+                    "type": "function",
+                    "name": tool.name,
+                    "description": tool.description,
+                    "parameters": tool.input_schema,
+                }
+                for tool in tools
+            ]
+        return request
+
+    @staticmethod
+    def _responses_input(messages: Sequence[Message]) -> list[dict]:
+        """Translate the neutral/chat replay shape to Responses input items."""
+        items: list[dict] = []
+        for message in messages:
+            role = message.get("role", "user")
+            content = message.get("content") or ""
+            if role == "tool":
+                items.append(
+                    {
+                        "type": "function_call_output",
+                        "call_id": message.get("tool_call_id", ""),
+                        "output": content,
+                    }
+                )
+                continue
+            if role == "assistant":
+                for call in message.get("tool_calls") or []:
+                    function = call.get("function") or {}
+                    items.append(
+                        {
+                            "type": "function_call",
+                            "call_id": call.get("id", ""),
+                            "name": function.get("name", ""),
+                            "arguments": function.get("arguments", "{}"),
+                        }
+                    )
+            response_role = "developer" if role == "system" else role
+            content_type = "output_text" if role == "assistant" else "input_text"
+            items.append(
+                {
+                    "role": response_role,
+                    "content": [{"type": content_type, "text": content}],
+                }
+            )
+        return items
+
+    def _send_turn(self, request: Any) -> Turn:
+        return self._responses_turn(self._client.responses.create(**request))
+
+    def _stream_turn(
+        self, request: Any, on_text: Callable[[str], None]
+    ) -> Turn:
+        # Responses streaming is event based. Retain correctness for tool calls
+        # first; the completed text is emitted once, like the base fallback.
+        turn = self._send_turn(request)
+        if turn.text:
+            on_text(turn.text)
+        return turn
+
+    def _responses_turn(self, response: Any) -> Turn:
+        calls: list[dict] = []
+        text_parts: list[str] = []
+        for item in getattr(response, "output", None) or []:
+            item_type = getattr(item, "type", "")
+            if item_type == "function_call":
+                calls.append(
+                    {
+                        "id": getattr(item, "call_id", "") or f"call_{len(calls)}",
+                        "name": getattr(item, "name", "") or "",
+                        "arguments": getattr(item, "arguments", "{}") or "{}",
+                    }
+                )
+            elif item_type == "message":
+                for part in getattr(item, "content", None) or []:
+                    if getattr(part, "type", "") == "output_text":
+                        text_parts.append(getattr(part, "text", "") or "")
+        text = "".join(text_parts) or getattr(response, "output_text", "") or ""
+        return self._openai_turn(
+            text, calls, usage_from_response(response, self.context_window)
+        )
+
+
 class AnthropicClient(LLMClient):
     """Anthropic client via the ``anthropic`` SDK."""
 
@@ -1808,6 +1928,8 @@ def _client_for(
         return AnthropicClient(config, timeout, max_retries)
     if config.name == "google":
         return GoogleClient(config, timeout, max_retries)
+    if config.api_mode == "responses":
+        return ResponsesClient(config, timeout, max_retries)
     # "openai" and "custom" both use the OpenAI SDK.
     return OpenAIClient(config, timeout, max_retries)
 

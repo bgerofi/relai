@@ -17,6 +17,7 @@ ludvart = "ludvart.__main__:main"
 
 [project.optional-dependencies]
 dev = ["pytest>=8"]
+copilot = ["litellm[proxy]"]
 
 [build-system]
 requires = ["hatchling"]

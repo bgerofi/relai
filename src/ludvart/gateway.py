@@ -18,6 +18,7 @@ from __future__ import annotations
 
 import contextlib
 import ctypes
+import json
 import os
 import queue
 import shutil
@@ -230,17 +231,20 @@ class CopilotGateway:
         self,
         model: str,
         *,
+        api_mode: str = "chat",
         host: str = GATEWAY_HOST,
         port: int | None = None,
         log_path: str | None = None,
     ) -> None:
         self.model = model  # e.g. "gpt-4o" (no provider prefix)
+        self.api_mode = api_mode
         self.host = host
         self.port = port or _free_port(host)
         self.log_path = log_path or os.path.join(
             os.path.expanduser("~"), ".ludvart", "copilot-gateway.log"
         )
         self._proc: subprocess.Popen | None = None
+        self._config_path: str | None = None
 
     @property
     def base_url(self) -> str:
@@ -266,9 +270,27 @@ class CopilotGateway:
             self.host,
             "--port",
             str(self.port),
-            "--model",
-            self.litellm_model,
         ]
+        if self.api_mode == "responses":
+            # Copilot's Responses-only models require this explicit proxy mode;
+            # ``--model`` alone configures a Chat Completions deployment.
+            self._config_path = os.path.join(
+                os.path.dirname(self.log_path), f"copilot-responses-{self.port}.json"
+            )
+            config = {
+                "model_list": [
+                    {
+                        "model_name": self.litellm_model,
+                        "model_info": {"mode": "responses"},
+                        "litellm_params": {"model": self.litellm_model},
+                    }
+                ]
+            }
+            with open(self._config_path, "w", encoding="utf-8") as config_file:
+                json.dump(config, config_file)
+            cmd += ["--config", self._config_path]
+        else:
+            cmd += ["--model", self.litellm_model]
         # Detach into its own process group so we can tear down the whole tree,
         # and route its noisy output to a log file (never the terminal, which
         # ludvart composites at runtime). The fork itself happens on the shared
@@ -321,16 +343,19 @@ class CopilotGateway:
         """Terminate the proxy (and its workers). Safe to call more than once."""
         proc = self._proc
         self._proc = None
-        if proc is None or proc.poll() is not None:
-            return
-        try:
-            os.killpg(os.getpgid(proc.pid), signal.SIGTERM)
-        except OSError:
-            proc.terminate()
-        try:
-            proc.wait(timeout=5)
-        except subprocess.TimeoutExpired:
-            with contextlib.suppress(OSError):
-                os.killpg(os.getpgid(proc.pid), signal.SIGKILL)
-            with contextlib.suppress(Exception):
+        if proc is not None and proc.poll() is None:
+            try:
+                os.killpg(os.getpgid(proc.pid), signal.SIGTERM)
+            except OSError:
+                proc.terminate()
+            try:
                 proc.wait(timeout=5)
+            except subprocess.TimeoutExpired:
+                with contextlib.suppress(OSError):
+                    os.killpg(os.getpgid(proc.pid), signal.SIGKILL)
+                with contextlib.suppress(Exception):
+                    proc.wait(timeout=5)
+        if self._config_path is not None:
+            with contextlib.suppress(OSError):
+                os.unlink(self._config_path)
+            self._config_path = None

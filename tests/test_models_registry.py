@@ -53,6 +53,19 @@ def test_save_and_reload_roundtrip_and_perms():
     print("save/reload roundtrip + 0600 perms: OK")
 
 
+def test_api_mode_round_trip_and_legacy_default():
+    path = _tmp_registry()
+    responses = _sample("copilot", "gpt-5.6-terra", active=True)
+    responses["api_mode"] = "responses"
+    reg.save_models([responses])
+    assert reg.load_models()[0]["api_mode"] == "responses"
+    # Older registry files have no api_mode and retain Chat-first behavior.
+    with open(path, "w", encoding="utf-8") as fh:
+        json.dump([_sample("copilot", "gpt-4o", active=True)], fh)
+    assert reg.load_models()[0]["api_mode"] == "chat"
+    print("api_mode round trip + legacy default: OK")
+
+
 def test_exactly_one_active_normalized():
     _tmp_registry()
     # Two marked active -> only the first stays active.
