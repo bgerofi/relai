@@ -17,6 +17,7 @@ _EOL = b"\x1b[K"
 _REVERSE = b"\x1b[7m"
 _CYAN = b"\x1b[36m"
 _DIM = b"\x1b[2m"
+_BOLD = b"\x1b[1m"
 
 _PROMPT = "ludvart> "
 
@@ -50,6 +51,10 @@ class AiPanel:
         # When True the input line is rendered masked (e.g. while typing an API
         # key during the guided /model add flow). The stored text is untouched.
         self.masked = False
+        # When set, the bottom input line is replaced by this confirmation
+        # question (e.g. "cancel request and toggle panel? (y/n)") until the
+        # user answers it. The typed input buffer is left untouched.
+        self.confirm_prompt = ""
 
     # -- state mutation ------------------------------------------------------
 
@@ -148,6 +153,8 @@ class AiPanel:
 
     def cursor_col(self) -> int:
         """1-based column of the input cursor on the panel's input row."""
+        if self.confirm_prompt:
+            return min(self.cols, len(self.confirm_prompt) + 1)
         return self._input_view()[1]
 
     def _content_lines(self) -> list[bytes]:
@@ -215,6 +222,9 @@ class AiPanel:
         return _REVERSE + text.encode("utf-8", "replace") + _RESET + _EOL
 
     def _input_line(self) -> bytes:
+        if self.confirm_prompt:
+            text = self.confirm_prompt[: self.cols]
+            return _BOLD + _CYAN + text.encode("utf-8", "replace") + _RESET + _EOL
         visible = self._input_view()[0]
         prefix = self._prompt_prefix()
         badge = (

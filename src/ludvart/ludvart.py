@@ -192,6 +192,10 @@ def _set_winsize(fd: int, rows: int, cols: int) -> None:
         pass
 
 
+class _AskCancelled(Exception):
+    """Raised inside the agent loop to unwind a user-cancelled LLM request."""
+
+
 class Ludvart:
     """A transparent PTY relay around a single child command.
 
@@ -285,6 +289,13 @@ class Ludvart:
         self._panel_closing = False
         self._panel_messages: list[tuple[str, str]] = []
         self._panel_context_pct: float | None = None
+        # Unsent input line preserved across panel toggles, so text typed but
+        # not yet submitted survives closing and re-opening the panel.
+        self._panel_draft = ""
+        self._panel_draft_cursor = 0
+        # True while the panel is showing the "cancel in-flight request and
+        # close?" confirmation; the next keystroke answers it (y/n).
+        self._confirm_close = False
         # Raw prompt-token count from the last turn's usage, kept so a model
         # switch can re-derive the context badge (and decide whether to compact)
         # against the *new* model's window without waiting for the next turn.
@@ -314,6 +325,10 @@ class Ludvart:
         self._ask_thread: threading.Thread | None = None
         self._ask_result = ""
         self._ask_done = threading.Event()
+        # Set to request that the in-flight background ask abandon itself: the
+        # agent loop checks it between steps (and while streaming) so a closed
+        # panel does not keep issuing requests or firing tool calls.
+        self._ask_cancel = threading.Event()
         # How a finished background job is delivered into the panel: LLM replies
         # go through ``_deliver_reply`` (persisted), deterministic actions (e.g.
         # ``/init_helpers``) through ``_deliver_system`` (ephemeral). Set when a
@@ -626,7 +641,10 @@ class Ludvart:
         self._panel = AiPanel(cols, height, provider)
         self._panel.restore(self._panel_messages)
         self._panel.context_pct = self._panel_context_pct
+        # Restore any unsent input line typed before the last toggle.
+        self._restore_panel_draft()
         self._panel_closing = False
+        self._confirm_close = False
         self._panel_pasting = False
         self._panel_pastebuf = bytearray()
 
@@ -773,6 +791,9 @@ class Ludvart:
         if self._panel is not None:
             self._panel_messages = self._panel.messages  # keep for next toggle
             self._panel_context_pct = self._panel.context_pct
+            # Preserve the unsent input line so it survives the toggle.
+            self._save_panel_draft()
+        self._confirm_close = False
         self.screen.resize(rows, cols)
         _set_winsize(self._master_fd, rows, cols)
         self._compositor = None
@@ -791,6 +812,9 @@ class Ludvart:
 
     def _panel_input(self, data: bytes) -> None:
         """Route a stdin read to the panel, extracting bracketed pastes first."""
+        if self._confirm_close:
+            self._handle_confirm_close(data)
+            return
         if self._panel_pasting:
             self._panel_pastebuf += data
             self._drain_paste()
@@ -839,7 +863,7 @@ class Ludvart:
             self._panel_command(data)
             return
         if data == self.summon:
-            self._panel_closing = True  # summon key toggles the panel closed
+            self._request_toggle_close()  # summon key toggles the panel closed
             return
         if data == self.prefix:
             self._awaiting_command = True
@@ -849,10 +873,75 @@ class Ludvart:
             return
         self._panel_key(data)
 
+    def _request_toggle_close(self) -> None:
+        """Toggle the panel closed, confirming first if an LLM request is running.
+
+        With an in-flight LLM ask, closing would abandon it, so the user is asked
+        to confirm; the next keystroke is routed to :meth:`_handle_confirm_close`.
+        Deterministic background actions (no LLM) close without prompting.
+        """
+        panel = self._panel
+        if panel is None:
+            return
+        if panel.thinking and self._deliver == self._deliver_reply:
+            if not self._confirm_close:
+                self._confirm_close = True
+                panel.confirm_prompt = (
+                    "LLM request in progress, cancel request and toggle "
+                    "panel? (y/n)"
+                )
+            return
+        self._panel_closing = True
+
+    def _handle_confirm_close(self, data: bytes) -> None:
+        """Answer the 'cancel request and toggle panel?' prompt.
+
+        ``y`` cancels the in-flight request and closes the panel; ``n`` (or Esc /
+        Ctrl-C) keeps it open; any other key leaves the prompt pending.
+        """
+        if data in (b"y", b"Y"):
+            self._confirm_close = False
+            if self._panel is not None:
+                self._panel.confirm_prompt = ""
+            self._cancel_ask()
+            self._panel_closing = True
+        elif data in (b"n", b"N", b"\x1b", b"\x03"):
+            self._confirm_close = False
+            if self._panel is not None:
+                self._panel.confirm_prompt = ""
+
+    def _cancel_ask(self) -> None:
+        """Abandon the in-flight LLM request and drop its eventual result.
+
+        The worker runs on a daemon thread that cannot be force-killed, so this
+        sets a cancellation flag the agent loop checks between steps (and while
+        streaming) to unwind promptly without issuing further requests or firing
+        more tool calls. Its result is ignored (see :meth:`_finish_ask`).
+        """
+        self._ask_cancel.set()
+        panel = self._panel
+        if panel is not None:
+            panel.thinking = False
+            panel.interim = ""
+
+    def _save_panel_draft(self) -> None:
+        """Remember the unsent input line so it survives a panel toggle."""
+        if self._panel is not None:
+            self._panel_draft = self._panel.editor.text
+            self._panel_draft_cursor = self._panel.editor.cursor
+
+    def _restore_panel_draft(self) -> None:
+        """Reapply the input line preserved by :meth:`_save_panel_draft`."""
+        if self._panel is not None:
+            self._panel.editor.text = self._panel_draft
+            self._panel.editor.cursor = min(
+                self._panel_draft_cursor, len(self._panel_draft)
+            )
+
     def _panel_command(self, key: bytes) -> None:
         """Handle a prefix command while the panel is open."""
         if key in (b"a", b"A"):
-            self._panel_closing = True  # toggle closed
+            self._request_toggle_close()  # toggle closed
         elif key in (b"\x1b[A", b"\x1bOA"):  # Up -> grow panel
             self._resize_panel(1)
         elif key in (b"\x1b[B", b"\x1bOB"):  # Down -> shrink panel
@@ -872,7 +961,7 @@ class Ludvart:
             editor.backspace()
             panel.scroll = 0
         elif key == b"\x1b":  # bare Esc closes
-            self._panel_closing = True
+            self._request_toggle_close()
         elif key in (b"\x1b[C", b"\x1bOC"):  # Right
             editor.right()
         elif key in (b"\x1b[D", b"\x1bOD"):  # Left
@@ -1600,11 +1689,14 @@ class Ludvart:
         self._render_split()  # show the question and the spinner immediately
 
         ask = self._ai_ask
+        self._ask_cancel = threading.Event()
         self._ask_done = threading.Event()
 
         def worker() -> None:
             try:
                 result = ask(question)
+            except _AskCancelled:
+                result = ""  # user abandoned the request; result is dropped
             except Exception as exc:  # surfaced to the user, never crashes ludvart
                 result = f"[ludvart] request failed: {exc}"
             self._ask_result = result
@@ -1767,6 +1859,14 @@ class Ludvart:
             self._ask_thread = None
         panel = self._panel
         if panel is None:
+            return
+        # A request that finished on its own resolves any pending close prompt.
+        self._confirm_close = False
+        panel.confirm_prompt = ""
+        # If it was cancelled, drop the result silently (the panel is closing).
+        if self._ask_cancel.is_set():
+            panel.thinking = False
+            panel.interim = ""
             return
         panel.thinking = False
         panel.interim = ""
@@ -1937,6 +2037,10 @@ class Ludvart:
         tool_result -> assistant round-tripping a tool-using client performs --
         until the model returns a plain text answer.
         """
+        # Capture this turn's cancellation flag locally: a later ask reassigns
+        # ``self._ask_cancel``, so an abandoned worker must keep checking the
+        # event it was started with rather than a newer one.
+        cancel = self._ask_cancel
         screen_text = self.snapshot_text()
         # Stamp each snapshot with a UTC timestamp (nanosecond precision) so it
         # can be addressed later. When older snapshots are stripped from the
@@ -1993,6 +2097,8 @@ class Ludvart:
 
         def _on_text(text: str) -> None:
             nonlocal last_stream
+            if cancel.is_set():
+                raise _AskCancelled()
             last_stream = text
             p = self._panel
             if p is not None:
@@ -2000,6 +2106,8 @@ class Ludvart:
 
         try:
             while True:
+                if cancel.is_set():
+                    raise _AskCancelled()
                 # Compact before EVERY request, not just once per user ask: a
                 # single agentic turn can issue many tool round-trips, and each
                 # re-sends the whole history (screen snapshots + tool outputs),
@@ -2035,6 +2143,8 @@ class Ludvart:
                 if last_stream:
                     narration.append(last_stream)
                 for call in turn.tool_calls:
+                    if cancel.is_set():
+                        raise _AskCancelled()
                     narration.append(self._tool_call_note(call))
                     if self._panel is not None:
                         self._panel.activity = f"Calling {call.name}"
