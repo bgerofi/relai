@@ -19,6 +19,7 @@ from ludvart.llm import (
     LLMClient,
     LLMError,
     ProviderConfig,
+    Turn,
     _describe_request_error,
     _is_rate_limit,
     _is_retryable,
@@ -162,6 +163,56 @@ def test_request_non_retryable_raises_immediately():
     except LLMError:
         pass
     assert calls["n"] == 1  # not retried
+
+
+def test_stream_does_not_retry_after_visible_output():
+    class _StreamingClient(LLMClient):
+        def _stream_turn(self, request, on_text):
+            self.calls += 1
+            on_text("partial")
+            raise _FakeTimeout("stream dropped")
+
+    client = _StreamingClient(_client().config, max_retries=2)
+    client.calls = 0
+    updates = []
+
+    try:
+        client.converse([{"role": "user", "content": "hello"}], on_text=updates.append)
+    except LLMError:
+        pass
+    else:
+        raise AssertionError("dropped stream unexpectedly succeeded")
+
+    assert client.calls == 1
+    assert updates == ["partial"]
+
+
+def test_stream_retries_before_visible_output(monkeypatch):
+    class _StreamingClient(LLMClient):
+        def _stream_turn(self, request, on_text):
+            self.calls += 1
+            if self.calls == 1:
+                raise _FakeTimeout("stream failed before output")
+            on_text("complete")
+            return Turn(
+                text="complete",
+                assistant_message={"role": "assistant", "content": "complete"},
+            )
+
+    import ludvart.llm as llm
+
+    monkeypatch.setattr(llm.time, "sleep", lambda _seconds: None)
+    client = _StreamingClient(_client().config, max_retries=2)
+    client.calls = 0
+    updates = []
+
+    turn = client.converse(
+        [{"role": "user", "content": "hello"}], on_text=updates.append
+    )
+
+    assert client.calls == 2
+    assert updates == ["complete"]
+    assert turn.text == "complete"
 
 
 def test_resolve_settings():

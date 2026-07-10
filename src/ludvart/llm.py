@@ -821,13 +821,21 @@ class LLMClient:
         # detected / unavailable). See :meth:`detect_context_window`.
         self._detected_context_window: int = 0
 
-    def _request(self, call: Callable[[], Any], *, what: str = "request") -> Any:
+    def _request(
+        self,
+        call: Callable[[], Any],
+        *,
+        what: str = "request",
+        can_retry: Callable[[], bool] | None = None,
+    ) -> Any:
         """Run one provider API ``call``, retrying transient failures.
 
         Retries up to ``self.max_retries`` times on timeouts, dropped
         connections, rate limits and 5xx responses, with exponential backoff
         plus jitter. A server-sent ``Retry-After`` header (rate limits / some
         503s) overrides the computed delay so we wait exactly as instructed.
+        When ``can_retry`` is provided, retries stop as soon as it returns
+        false; streamed requests use this to avoid replaying visible output.
         Before each retry the ``on_retry`` hook (if set) is called so the UI can
         report the wait. Non-retryable errors, and the final attempt's error,
         are wrapped in :class:`LLMError` with full diagnostics.
@@ -839,7 +847,12 @@ class LLMClient:
                 return call()
             except Exception as exc:  # SDK raises its own error hierarchy
                 elapsed = time.monotonic() - start
-                if attempt >= attempts or not _is_retryable(exc):
+                retry_allowed = can_retry is None or can_retry()
+                if (
+                    attempt >= attempts
+                    or not retry_allowed
+                    or not _is_retryable(exc)
+                ):
                     raise LLMError(
                         _describe_request_error(
                             self.name, exc, elapsed, self.timeout
@@ -933,7 +946,18 @@ class LLMClient:
         """
         request = self._prepare_converse(messages, tools, max_tokens)
         if on_text is not None:
-            turn = self._request(lambda: self._stream_turn(request, on_text))
+            visible_output = False
+
+            def emit_text(text: str) -> None:
+                nonlocal visible_output
+                if text:
+                    visible_output = True
+                on_text(text)
+
+            turn = self._request(
+                lambda: self._stream_turn(request, emit_text),
+                can_retry=lambda: not visible_output,
+            )
         else:
             turn = self._request(lambda: self._send_turn(request))
         self._last_usage = turn.usage
