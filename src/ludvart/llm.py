@@ -1361,27 +1361,75 @@ class ResponsesClient(OpenAIClient):
     def _stream_turn(
         self, request: Any, on_text: Callable[[str], None]
     ) -> Turn:
-        # Responses streaming is event based. Retain correctness for tool calls
-        # first; the completed text is emitted once, like the base fallback.
-        turn = self._send_turn(request)
-        if turn.text:
-            on_text(turn.text)
-        return turn
+        stream_request = dict(request)
+        stream_request["stream"] = True
+        text_parts: list[str] = []
+        calls: list[dict] = []
+        usage: Usage | None = None
+        completed_response = None
+        for event in self._client.responses.create(**stream_request):
+            event_type = self._event_value(event, "type")
+            if event_type == "response.output_text.delta":
+                delta = self._event_value(event, "delta") or ""
+                if delta:
+                    text_parts.append(delta)
+                    on_text("".join(text_parts))
+            elif event_type == "response.output_item.done":
+                item = self._event_value(event, "item")
+                call = self._function_call_from_item(item, len(calls))
+                if call is not None:
+                    calls.append(call)
+            elif event_type == "response.completed":
+                completed_response = self._event_value(event, "response")
+                usage = usage_from_response(
+                    completed_response, self.context_window
+                )
+
+        # Some gateways skip output_item.done. Fall back to their completed
+        # response for tool calls and final text without duplicating deltas.
+        if completed_response is not None:
+            final = self._responses_turn(completed_response)
+            if not calls:
+                calls = self._responses_calls(completed_response)
+            if not text_parts and final.text:
+                text_parts.append(final.text)
+                on_text(final.text)
+            usage = usage or final.usage
+        return self._openai_turn("".join(text_parts), calls, usage)
+
+    @staticmethod
+    def _event_value(event: Any, name: str) -> Any:
+        """Read an event field from either an SDK object or a mapping."""
+        if isinstance(event, dict):
+            return event.get(name)
+        return getattr(event, name, None)
+
+    @classmethod
+    def _function_call_from_item(cls, item: Any, index: int) -> dict | None:
+        """Return ludvart's internal call shape for a Responses output item."""
+        if cls._event_value(item, "type") != "function_call":
+            return None
+        return {
+            "id": cls._event_value(item, "call_id") or f"call_{index}",
+            "name": cls._event_value(item, "name") or "",
+            "arguments": cls._event_value(item, "arguments") or "{}",
+        }
+
+    @classmethod
+    def _responses_calls(cls, response: Any) -> list[dict]:
+        calls: list[dict] = []
+        for item in cls._event_value(response, "output") or []:
+            call = cls._function_call_from_item(item, len(calls))
+            if call is not None:
+                calls.append(call)
+        return calls
 
     def _responses_turn(self, response: Any) -> Turn:
-        calls: list[dict] = []
+        calls = self._responses_calls(response)
         text_parts: list[str] = []
         for item in getattr(response, "output", None) or []:
             item_type = getattr(item, "type", "")
-            if item_type == "function_call":
-                calls.append(
-                    {
-                        "id": getattr(item, "call_id", "") or f"call_{len(calls)}",
-                        "name": getattr(item, "name", "") or "",
-                        "arguments": getattr(item, "arguments", "{}") or "{}",
-                    }
-                )
-            elif item_type == "message":
+            if item_type == "message":
                 for part in getattr(item, "content", None) or []:
                     if getattr(part, "type", "") == "output_text":
                         text_parts.append(getattr(part, "text", "") or "")

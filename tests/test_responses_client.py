@@ -117,6 +117,41 @@ def test_responses_turn_parses_text_and_function_calls():
     print("Responses output parses text and function calls: OK")
 
 
+def test_responses_streams_text_and_function_calls():
+    client = _client_without_init()
+    completed = NS(
+        output=[
+            NS(
+                type="function_call",
+                call_id="fc_1",
+                name="lookup",
+                arguments='{"query":"status"}',
+            )
+        ],
+        usage=None,
+    )
+    events = iter(
+        [
+            NS(type="response.output_text.delta", delta="I will "),
+            NS(type="response.output_text.delta", delta="check that."),
+            NS(
+                type="response.output_item.done",
+                item=completed.output[0],
+            ),
+            NS(type="response.completed", response=completed),
+        ]
+    )
+    client._client = NS(responses=NS(create=lambda **kwargs: events))
+    updates = []
+    turn = client._stream_turn({"model": "test"}, updates.append)
+    assert updates == ["I will ", "I will check that."]
+    assert turn.text == "I will check that."
+    assert len(turn.tool_calls) == 1
+    assert turn.tool_calls[0].id == "fc_1"
+    assert turn.tool_calls[0].input == {"query": "status"}
+    print("Responses stream emits text deltas and function calls: OK")
+
+
 def test_copilot_chat_rejection_falls_back_to_responses(monkeypatch):
     chat = NS(
         config=ProviderConfig("custom", "http://gateway", "key", "github_copilot/terra"),
@@ -176,6 +211,7 @@ def main():
     test_responses_input_translates_tool_round_trip()
     test_responses_request_uses_responses_tool_shape()
     test_responses_turn_parses_text_and_function_calls()
+    test_responses_streams_text_and_function_calls()
     test_copilot_chat_rejection_falls_back_to_responses()
     test_non_copilot_chat_rejection_does_not_fallback()
     print("\nALL Responses client tests passed.")
