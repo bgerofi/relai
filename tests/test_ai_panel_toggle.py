@@ -71,7 +71,7 @@ def test_toggle_prompts_during_llm_request():
     assert r._panel_closing is False
     assert r._confirm_close is True
     assert r._panel.confirm_prompt == (
-        "LLM request in progress, cancel request and toggle panel? (y/n)"
+        "LLM request in progress: (a)bort & close  (c)ontinue  (s)teer"
     )
     print("in-flight LLM request prompts before closing: OK")
 
@@ -86,31 +86,31 @@ def test_toggle_no_prompt_for_deterministic_action():
     print("deterministic action closes without a prompt: OK")
 
 
-def test_confirm_yes_cancels_and_closes():
+def test_confirm_abort_cancels_and_closes():
     r = _make_ludvart()
     _start_llm_request(r)
     r._request_toggle_close()
-    # Answer 'y' via the input router (confirm state intercepts the keystroke).
-    r._panel_input(b"y")
+    # Answer 'a' via the input router (confirm state intercepts the keystroke).
+    r._panel_input(b"a")
     assert r._panel_closing is True
     assert r._confirm_close is False
     assert r._panel.confirm_prompt == ""
     assert r._ask_cancel.is_set()
     assert r._panel.thinking is False
-    print("'y' cancels the request and closes: OK")
+    print("'a' cancels the request and closes: OK")
 
 
-def test_confirm_no_keeps_panel_open():
+def test_confirm_continue_keeps_panel_open():
     r = _make_ludvart()
     _start_llm_request(r)
     r._request_toggle_close()
-    r._panel_input(b"n")
+    r._panel_input(b"c")
     assert r._panel_closing is False
     assert r._confirm_close is False
     assert r._panel.confirm_prompt == ""
     assert not r._ask_cancel.is_set()
     assert r._panel.thinking is True  # request still running
-    print("'n' keeps the panel open, request untouched: OK")
+    print("'c' keeps the panel open, request untouched: OK")
 
 
 def test_confirm_ignores_unrelated_keys():
@@ -132,7 +132,7 @@ def test_confirm_prompt_renders_on_bottom_input_line():
     r._request_toggle_close()
     rows = r._panel.render(height=8, cols=80)
     bottom = rows[-1].decode("utf-8", "replace")
-    assert "cancel request and toggle panel? (y/n)" in bottom
+    assert "LLM request in progress: (a)bort & close  (c)ontinue  (s)teer" in bottom
     # The normal prompt / typed draft must not appear on the input line.
     assert "ludvart>" not in bottom
     assert "draft not yet sent" not in bottom
@@ -152,7 +152,7 @@ def test_all_panel_close_keys_confirm_an_llm_request():
             r._panel_input(key)
         assert r._panel_closing is False, name
         assert r._confirm_close is True, name
-        assert r._panel.confirm_prompt.endswith("(y/n)"), name
+        assert r._panel.confirm_prompt.endswith("(s)teer"), name
     print("Ctrl-O, Esc, and Ctrl-G a all confirm before closing: OK")
 
 
@@ -162,8 +162,8 @@ def main():
     test_toggle_closes_immediately_when_idle()
     test_toggle_prompts_during_llm_request()
     test_toggle_no_prompt_for_deterministic_action()
-    test_confirm_yes_cancels_and_closes()
-    test_confirm_no_keeps_panel_open()
+    test_confirm_abort_cancels_and_closes()
+    test_confirm_continue_keeps_panel_open()
     test_confirm_ignores_unrelated_keys()
     test_confirm_prompt_renders_on_bottom_input_line()
     test_all_panel_close_keys_confirm_an_llm_request()

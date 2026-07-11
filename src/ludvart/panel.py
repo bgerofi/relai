@@ -55,6 +55,9 @@ class AiPanel:
         # question (e.g. "cancel request and toggle panel? (y/n)") until the
         # user answers it. The typed input buffer is left untouched.
         self.confirm_prompt = ""
+        # When set, the bottom input line accepts a steering instruction using
+        # this prompt instead of the normal ludvart prompt.
+        self.steer_prompt = ""
 
     # -- state mutation ------------------------------------------------------
 
@@ -128,14 +131,16 @@ class AiPanel:
             return ""
         return f"[{self.context_pct:.0f}%] "
 
-    def _input_view(self) -> tuple[str, int]:
+    def _input_view(
+        self, prompt: str = _PROMPT, badge: bool = True
+    ) -> tuple[str, int]:
         """Return the visible slice of the input and the 1-based cursor column.
 
         The input is a single line that scrolls horizontally so the cursor is
         always visible even when the text is wider than the panel.
         """
-        prefix_w = len(self._prompt_prefix())
-        avail = max(1, self.cols - len(_PROMPT) - prefix_w)
+        prefix_w = len(self._prompt_prefix()) if badge else 0
+        avail = max(1, self.cols - len(prompt) - prefix_w)
         text = self.editor.text
         cur = self.editor.cursor
         if self.masked:
@@ -148,13 +153,15 @@ class AiPanel:
             if cur < start:
                 start = cur
         visible = text[start : start + avail]
-        col = min(self.cols, prefix_w + len(_PROMPT) + (cur - start) + 1)
+        col = min(self.cols, prefix_w + len(prompt) + (cur - start) + 1)
         return visible, col
 
     def cursor_col(self) -> int:
         """1-based column of the input cursor on the panel's input row."""
         if self.confirm_prompt:
             return min(self.cols, len(self.confirm_prompt) + 1)
+        if self.steer_prompt:
+            return self._input_view(prompt=self.steer_prompt, badge=False)[1]
         return self._input_view()[1]
 
     def _content_lines(self) -> list[bytes]:
@@ -225,6 +232,12 @@ class AiPanel:
         if self.confirm_prompt:
             text = self.confirm_prompt[: self.cols]
             return _BOLD + _CYAN + text.encode("utf-8", "replace") + _RESET + _EOL
+        if self.steer_prompt:
+            visible = self._input_view(prompt=self.steer_prompt, badge=False)[0]
+            return (
+                _BOLD + _CYAN + self.steer_prompt.encode("utf-8", "replace")
+                + _RESET + visible.encode("utf-8", "replace") + _EOL
+            )
         visible = self._input_view()[0]
         prefix = self._prompt_prefix()
         badge = (

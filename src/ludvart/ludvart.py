@@ -296,6 +296,14 @@ class Ludvart:
         # True while the panel is showing the "cancel in-flight request and
         # close?" confirmation; the next keystroke answers it (y/n).
         self._confirm_close = False
+        # Steering is a second in-flight request state: it collects a new
+        # instruction, then cancels and replaces the active agent turn.
+        self._steer_input = False
+        self._steer_saved_draft = ""
+        self._steer_saved_cursor = 0
+        self._steer_pending: str | None = None
+        self._steer_user_echo: str | None = None
+        self._ask_root_question = ""
         # Raw prompt-token count from the last turn's usage, kept so a model
         # switch can re-derive the context badge (and decide whether to compact)
         # against the *new* model's window without waiting for the next turn.
@@ -815,6 +823,9 @@ class Ludvart:
 
     def _panel_input(self, data: bytes) -> None:
         """Route a stdin read to the panel, extracting bracketed pastes first."""
+        if self._steer_input:
+            self._handle_steer_input(data)
+            return
         if self._confirm_close:
             self._handle_confirm_close(data)
             return
@@ -890,28 +901,120 @@ class Ludvart:
             if not self._confirm_close:
                 self._confirm_close = True
                 panel.confirm_prompt = (
-                    "LLM request in progress, cancel request and toggle "
-                    "panel? (y/n)"
+                    "LLM request in progress: (a)bort & close  (c)ontinue  "
+                    "(s)teer"
                 )
             return
         self._panel_closing = True
 
     def _handle_confirm_close(self, data: bytes) -> None:
-        """Answer the 'cancel request and toggle panel?' prompt.
+        """Answer the in-flight request close prompt.
 
-        ``y`` cancels the in-flight request and closes the panel; ``n`` (or Esc /
-        Ctrl-C) keeps it open; any other key leaves the prompt pending.
+        ``a`` cancels the request and closes the panel; ``c`` (or Esc / Ctrl-C)
+        keeps it open; ``s`` collects a steering instruction. Any other key
+        leaves the prompt pending.
         """
-        if data in (b"y", b"Y"):
+        if data in (b"a", b"A"):
             self._confirm_close = False
             if self._panel is not None:
                 self._panel.confirm_prompt = ""
             self._cancel_ask()
             self._panel_closing = True
-        elif data in (b"n", b"N", b"\x1b", b"\x03"):
+        elif data in (b"c", b"C", b"\x1b", b"\x03"):
             self._confirm_close = False
             if self._panel is not None:
                 self._panel.confirm_prompt = ""
+        elif data in (b"s", b"S"):
+            self._enter_steer_input()
+
+    def _enter_steer_input(self) -> None:
+        """Replace the close prompt with an editable steering input line."""
+        panel = self._panel
+        if panel is None:
+            return
+        self._confirm_close = False
+        panel.confirm_prompt = ""
+        self._steer_saved_draft = panel.editor.text
+        self._steer_saved_cursor = panel.editor.cursor
+        panel.editor.set_text("")
+        panel.steer_prompt = "Steer request: "
+        self._steer_input = True
+
+    def _exit_steer_input(self, *, restore_draft: bool) -> None:
+        """Leave steering mode and optionally restore the prior input draft."""
+        panel = self._panel
+        self._steer_input = False
+        if panel is not None:
+            panel.steer_prompt = ""
+            if restore_draft:
+                panel.editor.set_text(self._steer_saved_draft)
+                panel.editor.cursor = min(
+                    self._steer_saved_cursor, len(self._steer_saved_draft)
+                )
+        self._steer_saved_draft = ""
+        self._steer_saved_cursor = 0
+
+    def _handle_steer_input(self, data: bytes) -> None:
+        """Edit, submit, or abandon the steering instruction."""
+        panel = self._panel
+        if panel is None:
+            return
+        if data in (b"\r", b"\n"):
+            self._submit_steer()
+        elif data in (b"\x1b", b"\x03"):
+            self._exit_steer_input(restore_draft=True)
+        elif data in (b"\x7f", b"\x08"):
+            panel.editor.backspace()
+            panel.scroll = 0
+        elif data in (b"\x1b[C", b"\x1bOC"):
+            panel.editor.right()
+        elif data in (b"\x1b[D", b"\x1bOD"):
+            panel.editor.left()
+        else:
+            text = data.decode("utf-8", "replace")
+            cleaned = "".join(ch for ch in text if ch >= " ")
+            if cleaned:
+                panel.editor.insert(cleaned)
+                panel.scroll = 0
+
+    def _submit_steer(self) -> None:
+        """Queue a steered replacement after the current worker unwinds."""
+        panel = self._panel
+        if panel is None:
+            return
+        steer_text = panel.take_input().strip()
+        if not steer_text:
+            self._exit_steer_input(restore_draft=True)
+            return
+        self._steer_pending = self._compose_steer_question(
+            self._ask_root_question, panel.interim, steer_text
+        )
+        self._steer_user_echo = steer_text
+        self._exit_steer_input(restore_draft=True)
+        # Keep the spinner active so _split_loop continues polling _ask_done.
+        self._ask_cancel.set()
+        panel.interim = ""
+        panel.activity = "Steering"
+
+    @staticmethod
+    def _compose_steer_question(root: str, narration: str, steer: str) -> str:
+        """Build the replacement request after the user interrupts an ask."""
+        progress = narration.strip() or "(no visible progress yet)"
+        original = root.strip() or "(original request unavailable)"
+        return (
+            "The user interrupted your previous attempt to steer you in a new "
+            "direction.\n\n"
+            "Your progress so far (your narration and tool calls):\n"
+            f"<priorProgress>\n{progress}\n</priorProgress>\n\n"
+            "The original request was:\n"
+            f"<originalRequest>\n{original}\n</originalRequest>\n\n"
+            "The user's new steering instruction (prioritize this; it overrides or "
+            "refines the original request):\n"
+            f"<steeringInstruction>\n{steer}\n</steeringInstruction>\n\n"
+            "Continue from the CURRENT terminal state shown above. Do not repeat "
+            "work already completed. If the steering instruction conflicts with "
+            "the original request, follow the steering instruction."
+        )
 
     def _cancel_ask(self) -> None:
         """Abandon the in-flight LLM request and drop its eventual result.
@@ -1671,7 +1774,12 @@ class Ludvart:
         )
 
     def _start_ask(
-        self, question: str, *, user_echo: str | None = None, info: str | None = None
+        self,
+        question: str,
+        *,
+        user_echo: str | None = None,
+        info: str | None = None,
+        root_question: str | None = None,
     ) -> None:
         """Kick off an agent turn on a background thread.
 
@@ -1691,6 +1799,9 @@ class Ludvart:
         panel.tick = 0
         self._deliver = self._deliver_reply
         self._llm_request_in_flight = True
+        self._ask_root_question = (
+            root_question if root_question is not None else question
+        )
         self._render_split()  # show the question and the spinner immediately
 
         ask = self._ai_ask
@@ -1865,10 +1976,31 @@ class Ludvart:
         panel = self._panel
         if panel is None:
             return
+        # The interrupted worker has now completed its history rollback, so it
+        # is safe to start the queued replacement turn.
+        if self._steer_pending is not None:
+            pending, echo = self._steer_pending, self._steer_user_echo
+            self._steer_pending = None
+            self._steer_user_echo = None
+            self._confirm_close = False
+            panel.confirm_prompt = ""
+            panel.thinking = False
+            panel.interim = ""
+            self._start_ask(
+                pending,
+                user_echo=echo,
+                root_question=self._ask_root_question,
+            )
+            self._render_split()
+            return
         # A request that finished on its own resolves any pending close prompt.
         self._confirm_close = False
         panel.confirm_prompt = ""
         self._llm_request_in_flight = False
+        # A natural completion while the user is entering a steer instruction
+        # wins; discard the half-typed steer text and restore the input draft.
+        if self._steer_input:
+            self._exit_steer_input(restore_draft=True)
         # If it was cancelled, drop the result silently (the panel is closing).
         if self._ask_cancel.is_set():
             panel.thinking = False
