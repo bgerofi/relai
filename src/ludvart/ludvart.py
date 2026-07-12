@@ -223,6 +223,11 @@ class Ludvart:
     #: main split loop feeds the PTY on its own thread, so this only reads.
     SETTLE_POLL = 0.05
 
+    #: A waiting activity (a tool run or the next model response) only shows its
+    #: live elapsed-seconds counter once it has been waiting at least this long,
+    #: so quick operations do not flash a distracting "0s".
+    ACTIVITY_ELAPSED_HINT = 2.0
+
     #: How long the screen must stay unchanged before the (patient) quiescence
     #: fallback considers a prompt-less context settled. Kept large so a normal
     #: command's brief silence never pre-empts the fast prompt-return path.
@@ -304,6 +309,12 @@ class Ludvart:
         self._steer_pending: str | None = None
         self._steer_user_echo: str | None = None
         self._ask_root_question = ""
+        # Live progress for the current waiting phase (a tool run or the wait
+        # for the next model response). ``_wait_since`` is the monotonic start;
+        # ``_wait_streaming`` suppresses the elapsed counter once the model has
+        # begun streaming text (the narration itself is then the progress).
+        self._wait_since: float | None = None
+        self._wait_streaming = False
         # Raw prompt-token count from the last turn's usage, kept so a model
         # switch can re-derive the context badge (and decide whether to compact)
         # against the *new* model's window without waiting for the next turn.
@@ -734,6 +745,7 @@ class Ludvart:
                     self._finish_ask()
                 else:
                     self._panel.tick += 1
+                    self._refresh_wait()
                     self._render_split()
 
     def _handle_split_resize(self) -> None:
@@ -993,6 +1005,7 @@ class Ludvart:
         self._exit_steer_input(restore_draft=True)
         # Keep the spinner active so _split_loop continues polling _ask_done.
         self._ask_cancel.set()
+        self._end_wait()
         panel.interim = ""
         panel.activity = "Steering"
 
@@ -1026,10 +1039,47 @@ class Ludvart:
         """
         self._ask_cancel.set()
         self._llm_request_in_flight = False
+        self._end_wait()
         panel = self._panel
         if panel is not None:
             panel.thinking = False
             panel.interim = ""
+
+    def _begin_wait(self, label: str) -> None:
+        """Start a waiting phase (a tool run or the next model response).
+
+        Sets the spinner label and starts the elapsed-time clock that
+        :meth:`_refresh_wait` reads so the user can see the wait progressing.
+        """
+        self._wait_since = time.monotonic()
+        self._wait_streaming = False
+        panel = self._panel
+        if panel is not None:
+            panel.activity = label
+            panel.activity_elapsed = None
+
+    def _end_wait(self) -> None:
+        """Clear the waiting phase so the elapsed counter stops and hides."""
+        self._wait_since = None
+        self._wait_streaming = False
+        if self._panel is not None:
+            self._panel.activity_elapsed = None
+
+    def _mark_wait_streaming(self) -> None:
+        """Note that the model has begun streaming, hiding the elapsed counter."""
+        self._wait_streaming = True
+        if self._panel is not None:
+            self._panel.activity_elapsed = None
+
+    def _refresh_wait(self) -> None:
+        """Update the spinner's live elapsed-seconds counter (main-loop tick)."""
+        panel = self._panel
+        if panel is None or not panel.thinking or self._wait_since is None:
+            return
+        if self._wait_streaming:
+            return
+        elapsed = time.monotonic() - self._wait_since
+        panel.activity_elapsed = elapsed if elapsed >= self.ACTIVITY_ELAPSED_HINT else None
 
     def _save_panel_draft(self) -> None:
         """Remember the unsent input line so it survives a panel toggle."""
@@ -1976,6 +2026,7 @@ class Ludvart:
         panel = self._panel
         if panel is None:
             return
+        self._end_wait()
         # The interrupted worker has now completed its history rollback, so it
         # is safe to start the queued replacement turn.
         if self._steer_pending is not None:
@@ -2238,6 +2289,7 @@ class Ludvart:
             if cancel.is_set():
                 raise _AskCancelled()
             last_stream = text
+            self._mark_wait_streaming()
             p = self._panel
             if p is not None:
                 p.interim = _compose(text)
@@ -2259,6 +2311,7 @@ class Ludvart:
                     panel.activity = "Thinking"
                     panel.interim = _compose()
                 last_stream = ""
+                self._begin_wait("Thinking")
                 with self._perf_timer("llm_request"):
                     turn = self.llm.converse(
                         [system, *self._build_llm_context()],
@@ -2266,6 +2319,7 @@ class Ludvart:
                         max_tokens=self.REPLY_MAX_TOKENS,
                         on_text=_on_text,
                     )
+                self._end_wait()
                 self._llm_history.append(self._neutral_assistant(turn))
                 if turn.usage is not None:
                     pct = turn.usage.context_percent()
@@ -2287,8 +2341,10 @@ class Ludvart:
                     if self._panel is not None:
                         self._panel.activity = f"Calling {call.name}"
                         self._panel.interim = _compose()
+                    self._begin_wait(f"Calling {call.name}")
                     with self._perf_timer(f"tool:{call.name}"):
                         output = self._run_tool(call)
+                    self._end_wait()
                     self._llm_history.append(
                         self._neutral_tool_result(call, output)
                     )

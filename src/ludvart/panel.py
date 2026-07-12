@@ -58,6 +58,10 @@ class AiPanel:
         # When set, the bottom input line accepts a steering instruction using
         # this prompt instead of the normal ludvart prompt.
         self.steer_prompt = ""
+        # Seconds the current activity has been waiting, appended to the spinner
+        # label (e.g. "Thinking (openai) - 8s") so a long, silent wait for a tool
+        # or the next model response is visibly progressing. None hides it.
+        self.activity_elapsed: float | None = None
 
     # -- state mutation ------------------------------------------------------
 
@@ -213,6 +217,8 @@ class AiPanel:
             base = self.activity
             if self.provider and base == "Thinking":
                 base = f"Thinking ({self.provider})"
+            if self.activity_elapsed is not None:
+                base = f"{base} - {self.activity_elapsed:.0f}s"
             label = f"{base}{dots}"
             for seg in _wrap(label, self.cols):
                 lines.append(_DIM + seg.encode("utf-8", "replace") + _RESET + _EOL)
