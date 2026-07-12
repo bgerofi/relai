@@ -1388,12 +1388,22 @@ class ResponsesClient(OpenAIClient):
         stream_request = dict(request)
         stream_request["stream"] = True
         text_parts: list[str] = []
+        reasoning_parts: list[str] = []
         calls: list[dict] = []
         usage: Usage | None = None
         completed_response = None
         for event in self._client.responses.create(**stream_request):
             event_type = self._event_value(event, "type")
-            if event_type == "response.output_text.delta":
+            if event_type == "response.reasoning_summary_text.delta":
+                delta = self._event_value(event, "delta") or ""
+                if delta:
+                    reasoning_parts.append(delta)
+                    # Reasoning summaries are public progress updates, not
+                    # assistant answer text. Once answer text begins, leave
+                    # the narration alone so it is not overwritten.
+                    if not text_parts:
+                        on_text("".join(reasoning_parts))
+            elif event_type == "response.output_text.delta":
                 delta = self._event_value(event, "delta") or ""
                 if delta:
                     text_parts.append(delta)
@@ -1403,6 +1413,11 @@ class ResponsesClient(OpenAIClient):
                 call = self._function_call_from_item(item, len(calls))
                 if call is not None:
                     calls.append(call)
+                elif not text_parts:
+                    summary = self._reasoning_summary_from_item(item)
+                    if summary:
+                        reasoning_parts.append(summary)
+                        on_text("".join(reasoning_parts))
             elif event_type == "response.completed":
                 completed_response = self._event_value(event, "response")
                 usage = usage_from_response(
@@ -1438,6 +1453,26 @@ class ResponsesClient(OpenAIClient):
             "name": cls._event_value(item, "name") or "",
             "arguments": cls._event_value(item, "arguments") or "{}",
         }
+
+    @classmethod
+    def _reasoning_summary_from_item(cls, item: Any) -> str:
+        """Extract public reasoning-summary text from a Responses output item.
+
+        Responses reasoning items can expose a model-provided summary as a list
+        of ``summary_text`` parts. This intentionally does not inspect or expose
+        any private reasoning payload; it is only a fallback for gateways that
+        omit individual ``response.reasoning_summary_text.delta`` events.
+        """
+        if cls._event_value(item, "type") != "reasoning":
+            return ""
+        pieces: list[str] = []
+        for part in cls._event_value(item, "summary") or []:
+            if cls._event_value(part, "type") != "summary_text":
+                continue
+            text = cls._event_value(part, "text")
+            if isinstance(text, str) and text:
+                pieces.append(text)
+        return "".join(pieces)
 
     @classmethod
     def _responses_calls(cls, response: Any) -> list[dict]:

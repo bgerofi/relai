@@ -152,6 +152,54 @@ def test_responses_streams_text_and_function_calls():
     print("Responses stream emits text deltas and function calls: OK")
 
 
+def test_responses_streams_reasoning_summary_as_narration():
+    client = _client_without_init()
+    completed = NS(output=[], usage=None)
+    events = iter(
+        [
+            NS(type="response.reasoning_summary_text.delta", delta="Checking "),
+            NS(type="response.reasoning_summary_text.delta", delta="the file."),
+            NS(type="response.output_text.delta", delta="It is present."),
+            # Later reasoning must not replace answer narration.
+            NS(type="response.reasoning_summary_text.delta", delta="Ignored."),
+            NS(type="response.completed", response=completed),
+        ]
+    )
+    client._client = NS(responses=NS(create=lambda **kwargs: events))
+    updates = []
+
+    turn = client._stream_turn({"model": "test"}, updates.append)
+
+    assert updates == ["Checking ", "Checking the file.", "It is present."]
+    assert turn.text == "It is present."
+    assert "Checking" not in turn.assistant_message["content"]
+    print("Responses reasoning summaries stream as transient narration: OK")
+
+
+def test_responses_reasoning_item_falls_back_to_narration():
+    client = _client_without_init()
+    reasoning = NS(
+        type="reasoning",
+        summary=[NS(type="summary_text", text="Considering options.")],
+    )
+    completed = NS(output=[], usage=None)
+    events = iter(
+        [
+            NS(type="response.output_item.done", item=reasoning),
+            NS(type="response.completed", response=completed),
+        ]
+    )
+    client._client = NS(responses=NS(create=lambda **kwargs: events))
+    updates = []
+
+    turn = client._stream_turn({"model": "test"}, updates.append)
+
+    assert updates == ["Considering options."]
+    assert turn.text == ""
+    assert turn.assistant_message["content"] == ""
+    print("Responses reasoning-item fallback emits transient narration: OK")
+
+
 def test_copilot_chat_rejection_falls_back_to_responses(monkeypatch):
     chat = NS(
         config=ProviderConfig("custom", "http://gateway", "key", "github_copilot/terra"),
@@ -212,6 +260,8 @@ def main():
     test_responses_request_uses_responses_tool_shape()
     test_responses_turn_parses_text_and_function_calls()
     test_responses_streams_text_and_function_calls()
+    test_responses_streams_reasoning_summary_as_narration()
+    test_responses_reasoning_item_falls_back_to_narration()
     test_copilot_chat_rejection_falls_back_to_responses()
     test_non_copilot_chat_rejection_does_not_fallback()
     print("\nALL Responses client tests passed.")
