@@ -110,6 +110,14 @@ def test_autoinit_removed():
     print("auto-init removed: OK")
 
 
+def test_system_prompt_requires_helper_over_raw_injected_shell():
+    r, _, _ = make_ludvart()
+    prompt = r._llm_system_prompt()
+    assert "MUST use ludvart_helper instead of injecting raw shell input" in prompt
+    assert "Use raw injected shell input only for interactive terminal work" in prompt
+    print("system prompt requires helper over raw injected shell input: OK")
+
+
 def test_tab_completion():
     r, _, _ = make_ludvart()
     for ch in "/init":
@@ -124,5 +132,6 @@ if __name__ == "__main__":
     test_init_helpers_works_without_llm()
     test_parse_helper_init_cases()
     test_autoinit_removed()
+    test_system_prompt_requires_helper_over_raw_injected_shell()
     test_tab_completion()
     print("all init-helpers tests passed")

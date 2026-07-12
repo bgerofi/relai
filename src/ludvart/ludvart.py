@@ -150,10 +150,13 @@ Subcommands:
       fresh session if this spec is ever unavailable.
 ### Usage conventions
   - Pass content/commands as base64:  --b64 "$(printf %s "$TEXT" | base64 -w0)"
-    (use `base64 -w0` to avoid line wrapping).
-  - Prefer ludvart_helper over raw shell for reading, editing, and searching
-    files -- it eliminates quoting/escape corruption and gives a reliable exit
-    code. Plain shell is fine when it's genuinely simpler.
+        (use `base64 -w0` to avoid line wrapping).
+    - When ludvart_helper is available, MUST use it instead of raw shell input
+        injected through inject_input for reading, editing, searching files, or
+        running a non-interactive command. It base64-encodes payloads, avoids
+        quoting/escape corruption, and gives a reliable exit code. Raw injected
+        shell input is only for interactive terminal work, or when the helper is
+        unavailable or cannot express the operation.
   - Parse results from the LUDVART:BEGIN/END frame and base64-decode the payload;
     rely on `exit=` rather than reading success from screen text.
   - Keep helpers under ~/.ludvart/ (outside the user's repos) so they never show
@@ -2394,14 +2397,17 @@ class Ludvart:
             "\" quotes, and '->' for arrows.\n\n"
             "When helper tools under ~/.ludvart/bin/ are available (check with "
             "'ls ~/.ludvart/bin/' and 'ludvart_helper info' early in a session), "
-            "PREFER them for reading, editing, and searching files -- e.g. "
-            "'ludvart_helper read', 'replace', 'search'. They pass content as "
-            "base64 and return a sentinel-framed exit code, which eliminates "
-            "the shell/escape/quoting corruption that ad-hoc 'python3 -c' or "
-            "heredoc edits suffer from. Do NOT hand-roll multi-layer quoted "
-            "scripts to edit a file when a helper can do it in one call. Use the "
-            "native 'b64_encode'/'b64_decode' tools to build the base64 payloads "
-            "for ludvart_helper and to read its base64 result frames, instead of "
+            "you MUST use ludvart_helper instead of injecting raw shell input "
+            "through inject_input for file reads, edits, searches, and "
+            "non-interactive commands. Use 'ludvart_helper read', 'replace', "
+            "'search', or 'run' as appropriate. Its base64 payloads and "
+            "sentinel-framed exit codes avoid dangerous quoting/escape corruption. "
+            "Use raw injected shell input only for interactive terminal work, or "
+            "when the helper is unavailable or cannot express the operation. Do "
+            "NOT hand-roll multi-layer quoted scripts to edit a file when a "
+            "helper can do it in one call. Use the native "
+            "'b64_encode'/'b64_decode' tools to build the base64 payloads for "
+            "ludvart_helper and to read its base64 result frames, instead of "
             "'printf | base64' / 'base64 -d' in the shell.\n\n"
             "(ludvart_helper v0.2.0+ adds safer edits: 'replace --expect-count N' "
             "fails without writing if the match count differs; '--dry-run' on "
