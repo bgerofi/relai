@@ -379,6 +379,7 @@ SLASH_COMMANDS: dict[str, list[str]] = {
     "mcp_refresh": [],
     "model": ["add", "list", "remove", "use"],
     "perf": ["dump", "summary"],
+    "revoke_approval": [],
     "sessions": ["list", "load", "new"],
 }
 
@@ -414,6 +415,11 @@ SLASH_COMMAND_HELP: list[tuple[str, str]] = [
         "calls) for this session.",
     ),
     ("/perf dump", "Dump the raw per-operation timing records into the panel."),
+    (
+        "/revoke_approval",
+        "Revoke a previous 'approve everything' choice so future inject_input "
+        "tool calls ask for approval again.",
+    ),
 ]
 
 

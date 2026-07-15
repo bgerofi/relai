@@ -110,6 +110,49 @@ def test_cancel_unblocks_pending_approval_as_declined():
     print("cancelling ask unblocks pending inject approval safely: OK")
 
 
+def test_revoke_approval_reprompts_future_injections():
+    runner, writes = _make_ludvart()
+
+    # Grant session-wide approval, then revoke it.
+    first, out1 = _run_inject_tool(runner, {"text": "whoami", "submit": True})
+    assert _wait_pending(runner), "approval prompt did not appear"
+    runner._panel_input(b"a")
+    first.join(timeout=2)
+    assert runner._inject_approval_all is True
+
+    runner._handle_slash_command("/revoke_approval")
+    assert runner._inject_approval_all is False
+    assert any(
+        "revoked" in t for k, t in runner._panel.messages if k == "system"
+    )
+
+    # A later inject_input must prompt again rather than auto-approve.
+    t, out = _run_inject_tool(runner, {"text": "pwd", "submit": True})
+    assert _wait_pending(runner), "revoked approval should prompt again"
+    runner._panel_input(b"n")
+    t.join(timeout=2)
+    assert out["result"] == "[ludvart] inject_input declined by user approval gate."
+    print("/revoke_approval makes future injections ask again: OK")
+
+
+def test_revoke_approval_without_grant_is_noop_message():
+    runner, _writes = _make_ludvart()
+    assert runner._inject_approval_all is False
+    runner._handle_slash_command("/revoke_approval")
+    assert runner._inject_approval_all is False
+    assert any(
+        "nothing to revoke" in t for k, t in runner._panel.messages if k == "system"
+    )
+    print("/revoke_approval with no grant reports nothing to revoke: OK")
+
+
+def test_revoke_approval_is_completable():
+    from ludvart.session import complete_slash
+
+    assert complete_slash("/revoke") == "/revoke_approval "
+    print("/revoke_approval tab-completes: OK")
+
+
 def main():
     test_inject_prompt_yes_executes_tool()
     test_inject_prompt_no_declines_tool()
@@ -117,6 +160,9 @@ def main():
     test_cancel_unblocks_pending_approval_as_declined()
     test_helper_run_preview_decodes_command()
     test_helper_run_preview_keeps_invalid_payload()
+    test_revoke_approval_reprompts_future_injections()
+    test_revoke_approval_without_grant_is_noop_message()
+    test_revoke_approval_is_completable()
     print("\nALL inject approval tests passed.")
 
 

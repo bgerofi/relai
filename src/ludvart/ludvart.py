@@ -1324,6 +1324,8 @@ class Ludvart:
             self._cmd_mcp_refresh()
         elif cmd == "perf":
             self._cmd_perf(args)
+        elif cmd == "revoke_approval":
+            self._cmd_revoke_approval()
         elif cmd == "help":
             self._cmd_help()
         else:
@@ -1458,6 +1460,25 @@ class Ludvart:
             info="Compacting conversation context\u2026",
             activity="Compacting context",
         )
+
+    def _cmd_revoke_approval(self) -> None:
+        """Handle ``/revoke_approval``: clear a prior 'approve everything' choice.
+
+        After this, every future inject_input tool call prompts for approval
+        again (y/n/a), even if the user had previously chosen 'a'.
+        """
+        panel = self._panel
+        if panel is None:
+            return
+        if self._inject_approval_all:
+            self._inject_approval_all = False
+            panel.add_system(
+                "inject_input approval revoked; future injections will ask again."
+            )
+        else:
+            panel.add_system(
+                "inject_input approval is not currently granted; nothing to revoke."
+            )
 
     def _cmd_mcp_refresh(self) -> None:
         """Handle ``/mcp_refresh``: re-read mcp.json and rediscover tools."""
