@@ -312,6 +312,11 @@ class Ludvart:
         self._steer_pending: str | None = None
         self._steer_user_echo: str | None = None
         self._ask_root_question = ""
+        # Approval gate for LLM-triggered inject_input calls.
+        self._inject_approval_all = False
+        self._inject_approval_pending = False
+        self._inject_approval_event = threading.Event()
+        self._inject_approval_decision: bool | None = None
         # Live progress for the current waiting phase (a tool run or the wait
         # for the next model response). ``_wait_since`` is the monotonic start;
         # ``_wait_streaming`` suppresses the elapsed counter once the model has
@@ -838,6 +843,9 @@ class Ludvart:
 
     def _panel_input(self, data: bytes) -> None:
         """Route a stdin read to the panel, extracting bracketed pastes first."""
+        if self._inject_approval_pending:
+            self._handle_inject_approval(data)
+            return
         if self._steer_input:
             self._handle_steer_input(data)
             return
@@ -1042,11 +1050,65 @@ class Ludvart:
         """
         self._ask_cancel.set()
         self._llm_request_in_flight = False
+        self._resolve_inject_approval(False)
         self._end_wait()
         panel = self._panel
         if panel is not None:
             panel.thinking = False
             panel.interim = ""
+
+    def _inject_approval_prompt(self, text: str) -> str:
+        """Prompt line for an inject_input approval request.
+
+        Keep the typed payload visible but compact enough for a single-line
+        input row by escaping line breaks and clipping long text.
+        """
+        shown = text.replace("\r", r"\r").replace("\n", r"\n")
+        if len(shown) > 160:
+            shown = shown[:157] + "..."
+        return (
+            "Ludvart is trying to inject the following input into the terminal: "
+            f'"{shown}". Do you approve? y(es) / n(o) / '
+            "a(pprove everything from here on)."
+        )
+
+    def _resolve_inject_approval(self, approved: bool) -> None:
+        """Finish a pending inject_input approval request and unblock the tool."""
+        if not self._inject_approval_pending:
+            return
+        self._inject_approval_pending = False
+        self._inject_approval_decision = approved
+        if self._panel is not None:
+            self._panel.confirm_prompt = ""
+        self._inject_approval_event.set()
+
+    def _handle_inject_approval(self, data: bytes) -> None:
+        """Handle y/n/a answers for a pending inject_input approval prompt."""
+        if data in (b"y", b"Y"):
+            self._resolve_inject_approval(True)
+        elif data in (b"a", b"A"):
+            self._inject_approval_all = True
+            self._resolve_inject_approval(True)
+        elif data in (b"n", b"N", b"\x1b", b"\x03"):
+            self._resolve_inject_approval(False)
+
+    def _await_inject_approval(self, text: str) -> bool:
+        """Block the inject_input tool call until the user answers y/n/a."""
+        if self._inject_approval_all:
+            return True
+        panel = self._panel
+        if panel is None:
+            return False
+        self._inject_approval_decision = None
+        self._inject_approval_event = threading.Event()
+        self._inject_approval_pending = True
+        panel.confirm_prompt = self._inject_approval_prompt(text)
+        while True:
+            if self._inject_approval_event.wait(0.05):
+                return bool(self._inject_approval_decision)
+            if self._ask_cancel.is_set():
+                self._resolve_inject_approval(False)
+                return False
 
     def _begin_wait(self, label: str) -> None:
         """Start a waiting phase (a tool run or the next model response).
@@ -3059,6 +3121,8 @@ class Ludvart:
         text = args.get("text", "")
         if not isinstance(text, str):
             return "[ludvart] inject_input: 'text' must be a string."
+        if not self._await_inject_approval(text):
+            return "[ludvart] inject_input declined by user approval gate."
         if args.get("interpret_escapes", True):
             data = self._decode_escapes(text)
         else:
