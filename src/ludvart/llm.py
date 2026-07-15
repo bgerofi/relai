@@ -1,26 +1,31 @@
 """LLM provider clients.
 
-ludvart talks to one of three providers, selected from a triplet of variables per
-provider:
+Every model the user registers lives in ``~/.ludvart/models.json`` -- an array of
+registrations, each holding a provider, endpoint URL, API key, model name, API
+mode, and whether it is the active one (see :mod:`ludvart.models`). That registry
+is the source of truth for which models exist; the first time it is needed it is
+seeded once from any legacy ``~/.ludvart/llm.conf`` / environment configuration.
 
-    OpenAI:     OPENAI_API_URL     OPENAI_API_KEY     OPENAI_MODEL
-    Anthropic:  ANTHROPIC_API_URL  ANTHROPIC_API_KEY  ANTHROPIC_MODEL
-    Google:     GOOGLE_API_URL     GOOGLE_API_KEY     GOOGLE_MODEL
-    Custom:     CUSTOM_API_URL     CUSTOM_API_KEY     CUSTOM_MODEL
+This module implements the clients that actually talk to a provider. Each client
+is built from a :class:`ProviderConfig` (one registration's fields), so it does
+not read the registry itself:
 
-These variables are read from the process environment and, as a fallback, from a
-``~/.ludvart/llm.conf`` file (simple ``KEY=VALUE`` lines). Environment variables
-take precedence over the file, so the file provides defaults that can still be
-overridden per-invocation.
+    - "openai" and "custom" use the official ``openai`` SDK (custom just points
+      ``base_url`` at an OpenAI-compatible server: LM Studio, llama.cpp, vLLM,
+      Ollama's OpenAI shim, the local GitHub Copilot gateway, ...).
+    - "anthropic" uses the official ``anthropic`` SDK.
+    - "google" uses the ``google-genai`` (Gemini) SDK.
 
-The "openai" and "custom" providers use the official ``openai`` SDK (custom just
-points ``base_url`` at an OpenAI-compatible server: LM Studio, llama.cpp, vLLM,
-Ollama's OpenAI shim, gateways, ...). The "anthropic" provider uses the official
-``anthropic`` SDK, and "google" uses the ``google-genai`` (Gemini) SDK.
+An OpenAI-compatible provider can run in one of two API modes (``api_mode`` on
+:class:`ProviderConfig`): the default Chat Completions mode (:class:`OpenAIClient`)
+or the Responses API mode (:class:`ResponsesClient`), needed for models exposed
+only on ``/responses`` (e.g. some GitHub Copilot models behind the local gateway).
 
-A provider is considered "configured" only when all three of its variables are
-set; if several are configured, one is chosen by a fixed precedence
-(custom > google > anthropic > openai).
+Legacy single-provider configuration is still honoured when seeding the registry:
+a provider triplet (e.g. ``OPENAI_API_URL`` / ``OPENAI_API_KEY`` / ``OPENAI_MODEL``)
+read from the environment or ``~/.ludvart/llm.conf`` counts as "configured" only
+when all three are set; if several are configured, one is chosen by a fixed
+precedence (custom > google > anthropic > openai).
 
 Two optional settings tune request behaviour (env or ``~/.ludvart/llm.conf``):
 ``LUDVART_LLM_TIMEOUT`` (seconds per request, default 120 -- applied as the read
