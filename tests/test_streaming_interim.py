@@ -19,6 +19,7 @@ sys.path.insert(0, str(Path(__file__).resolve().parents[1] / "src"))
 from ludvart.llm import (  # noqa: E402
     AnthropicClient,
     LLMClient,
+    LLMError,
     ProviderConfig,
     ToolCall,
     ToolSpec,
@@ -111,6 +112,112 @@ def test_anthropic_converse_streams_and_assembles():
     # The tools were forwarded to the streaming request.
     assert "tools" in captured["kwargs"], captured["kwargs"]
     print("anthropic converse streams and assembles: OK")
+
+
+def test_anthropic_stream_assembly_error_becomes_llm_error():
+    """A truncated/out-of-order stream raising IndexError yields a clean error."""
+
+    class _BrokenStream(_FakeStream):
+        def get_final_message(self):
+            raise IndexError("list index out of range")
+
+    def _stream(**kwargs):
+        return _BrokenStream(["partial"], None)
+
+    client = AnthropicClient(
+        ProviderConfig(name="anthropic", api_url="http://x", api_key="k", model="m")
+    )
+    client._client = SimpleNamespace(messages=SimpleNamespace(stream=_stream))
+
+    raised = None
+    try:
+        client._stream_turn({"model": "m"}, lambda _t: None)
+    except LLMError as exc:
+        raised = exc
+    assert raised is not None, "IndexError should be wrapped in LLMError"
+    msg = str(raised)
+    assert "anthropic streaming response could not be assembled" in msg, msg
+    assert "IndexError" in msg, msg
+    print("anthropic stream assembly error becomes a clean LLMError: OK")
+
+
+def test_anthropic_stream_assembly_retries_before_visible_output():
+    """A stream assembly failure with no visible text yet is retried."""
+    import ludvart.llm as llm
+
+    final = SimpleNamespace(
+        content=[SimpleNamespace(type="text", text="recovered")],
+        usage=SimpleNamespace(input_tokens=1, output_tokens=1),
+    )
+    calls = {"n": 0}
+
+    class _BrokenThenOK(_FakeStream):
+        def get_final_message(self):
+            if self._final is None:
+                raise IndexError("list index out of range")
+            return self._final
+
+    def _stream(**kwargs):
+        calls["n"] += 1
+        if calls["n"] == 1:
+            return _BrokenThenOK([], None)  # no visible text, then raises
+        return _BrokenThenOK(["recovered"], final)
+
+    client = AnthropicClient(
+        ProviderConfig(name="anthropic", api_url="http://x", api_key="k", model="m")
+    )
+    client._client = SimpleNamespace(messages=SimpleNamespace(stream=_stream))
+
+    saved_sleep = llm.time.sleep
+    llm.time.sleep = lambda _s: None
+    try:
+        seen = []
+        turn = client.converse(
+            [{"role": "user", "content": "hi"}], on_text=seen.append
+        )
+    finally:
+        llm.time.sleep = saved_sleep
+
+    assert calls["n"] == 2, calls  # retried once, then succeeded
+    assert turn.text == "recovered", turn.text
+    print("anthropic stream assembly retries before visible output: OK")
+
+
+def test_anthropic_stream_assembly_not_retried_after_visible_output():
+    """Once text has been shown, a later assembly failure is not replayed."""
+    import ludvart.llm as llm
+
+    calls = {"n": 0}
+
+    class _VisibleThenBroken(_FakeStream):
+        def get_final_message(self):
+            raise IndexError("list index out of range")
+
+    def _stream(**kwargs):
+        calls["n"] += 1
+        return _VisibleThenBroken(["partial"], None)
+
+    client = AnthropicClient(
+        ProviderConfig(name="anthropic", api_url="http://x", api_key="k", model="m")
+    )
+    client._client = SimpleNamespace(messages=SimpleNamespace(stream=_stream))
+
+    saved_sleep = llm.time.sleep
+    llm.time.sleep = lambda _s: None
+    try:
+        raised = None
+        try:
+            client.converse(
+                [{"role": "user", "content": "hi"}], on_text=lambda _t: None
+            )
+        except LLMError as exc:
+            raised = exc
+    finally:
+        llm.time.sleep = saved_sleep
+
+    assert raised is not None, "assembly failure should surface as LLMError"
+    assert calls["n"] == 1, calls  # visible output -> no retry
+    print("anthropic stream assembly not retried after visible output: OK")
 
 
 def test_anthropic_non_stream_unchanged():
@@ -331,6 +438,9 @@ def main():
 
     test_base_converse_calls_on_text()
     test_anthropic_converse_streams_and_assembles()
+    test_anthropic_stream_assembly_error_becomes_llm_error()
+    test_anthropic_stream_assembly_retries_before_visible_output()
+    test_anthropic_stream_assembly_not_retried_after_visible_output()
     test_anthropic_non_stream_unchanged()
     test_anthropic_drops_empty_text_block()
     test_anthropic_empty_only_turn_gets_filler()

@@ -226,6 +226,15 @@ class LLMError(RuntimeError):
     """Raised when an LLM request fails (network, auth, bad response, ...)."""
 
 
+class StreamAssemblyError(LLMError):
+    """A streamed response could not be reassembled into a final message.
+
+    Treated as retryable so a truncated / out-of-order stream is re-requested,
+    but only while no text has been shown yet (the ``converse`` retry guard
+    stops replaying once visible output has reached the user).
+    """
+
+
 class LLMNotConfigured(RuntimeError):
     """Raised when no provider is fully configured."""
 
@@ -320,6 +329,8 @@ def _http_status(exc: BaseException) -> int | None:
 
 def _is_retryable(exc: BaseException) -> bool:
     """True if ``exc`` looks like a transient failure worth retrying."""
+    if isinstance(exc, StreamAssemblyError):
+        return True
     if type(exc).__name__ in _RETRYABLE_TYPES:
         return True
     status = _http_status(exc)
@@ -1630,11 +1641,23 @@ class AnthropicClient(LLMClient):
         # model's narration live, then assemble the final message (which also
         # carries any tool_use blocks and the usage totals).
         acc: list[str] = []
-        with self._client.messages.stream(**request) as stream:
-            for delta in stream.text_stream:
-                acc.append(delta)
-                on_text("".join(acc))
-            resp = stream.get_final_message()
+        try:
+            with self._client.messages.stream(**request) as stream:
+                for delta in stream.text_stream:
+                    acc.append(delta)
+                    on_text("".join(acc))
+                resp = stream.get_final_message()
+        except (IndexError, KeyError) as exc:
+            # The Anthropic SDK assembles the streamed SSE events (by content
+            # block index) into the final message; an out-of-order or truncated
+            # stream can make that accumulation raise a bare IndexError/KeyError.
+            # Surface it as a clean, diagnostic error. It is retryable, but the
+            # converse() guard only replays it while no text has been shown yet.
+            raise StreamAssemblyError(
+                f"{self.name} streaming response could not be assembled "
+                f"({type(exc).__name__}: {exc}); the stream was likely "
+                "truncated or delivered out of order"
+            ) from exc
         return self._turn_from_message(resp)
 
     def _turn_from_message(self, resp: Any) -> Turn:
