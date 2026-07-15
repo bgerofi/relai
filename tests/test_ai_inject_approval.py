@@ -115,7 +115,30 @@ def main():
     test_inject_prompt_no_declines_tool()
     test_inject_prompt_a_approves_all_for_session()
     test_cancel_unblocks_pending_approval_as_declined()
+    test_helper_run_preview_decodes_command()
+    test_helper_run_preview_keeps_invalid_payload()
     print("\nALL inject approval tests passed.")
+
+
+
+def test_helper_run_preview_decodes_command():
+    runner, _writes = _make_ludvart()
+    encoded = "Z2l0IHN0YXR1cyAtLXNob3J0"
+    prompt = runner._inject_approval_prompt(
+        f"~/.ludvart/bin/ludvart_helper run --b64 {encoded}"
+    )
+
+    assert '"git status --short"' in prompt
+    assert encoded not in prompt
+    print("helper run approval preview decodes command: OK")
+
+
+def test_helper_run_preview_keeps_invalid_payload():
+    runner, _writes = _make_ludvart()
+    text = "ludvart_helper run --b64 not-base64!"
+
+    assert runner._inject_approval_preview(text) == text
+    print("helper run approval preview keeps invalid payload: OK")
 
 
 if __name__ == "__main__":

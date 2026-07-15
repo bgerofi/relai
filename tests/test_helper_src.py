@@ -129,7 +129,8 @@ def test_install_current_and_repair():
         payload = _b64.b64encode(b"echo hi").decode()
         run = subprocess.run([dest, "run", "--b64", payload],
                              capture_output=True, text=True)
-        assert run.returncode == 0 and "op=run" in run.stdout, run.stdout
+        assert run.returncode == 0, run.stdout
+        assert run.stdout == "hi\n<<<LUDVART:END op=run exit=0>>>\n", run.stdout
     print("install / current / repair round-trip: OK")
 
 

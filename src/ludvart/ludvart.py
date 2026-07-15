@@ -140,10 +140,11 @@ Subcommands:
       __pycache__. Payload = base64 of newline-joined "file:line:text" hits.
       exit=0 if any match, exit=1 if none. Meta: matches=.
   run --b64 CMD
-      Run base64-decoded CMD via the shell; payload = base64 of combined
-      stdout + (stderr appended after a "[stderr]" marker). `exit=` is the
-      command's real exit status. NOTE: for a pipeline/;-list this is the
-      status of the LAST command, same as normal shell semantics.
+      Run base64-decoded CMD via the shell, streaming its stdout and stderr
+      directly to the terminal. The helper then prints
+      `<<<LUDVART:END op=run exit=CODE>>>`; CODE is the command's real exit
+      status. NOTE: for a pipeline/;-list this is the status of the LAST
+      command, same as normal shell semantics.
   info
       Payload = base64 of "ludvart_helper <ver>\\ncaps=...\\npython=...".
       Use this (or `ludvart_helper <subcmd> -h`) to re-derive the interface in a
@@ -1057,13 +1058,26 @@ class Ludvart:
             panel.thinking = False
             panel.interim = ""
 
+    def _inject_approval_preview(self, text: str) -> str:
+        """Return a readable preview for an inject_input approval request."""
+        helper_run = re.search(
+            r"(?:^|[;&|]\s*)\S*ludvart_helper\s+run\s+--b64\s+(\S+)", text
+        )
+        if helper_run:
+            try:
+                return base64.b64decode(helper_run.group(1), validate=True).decode("utf-8")
+            except (ValueError, UnicodeDecodeError):
+                pass
+        return text
+
     def _inject_approval_prompt(self, text: str) -> str:
         """Prompt line for an inject_input approval request.
 
         Keep the typed payload visible but compact enough for a single-line
         input row by escaping line breaks and clipping long text.
         """
-        shown = text.replace("\r", r"\r").replace("\n", r"\n")
+        shown = self._inject_approval_preview(text)
+        shown = shown.replace("\r", r"\r").replace("\n", r"\n")
         if len(shown) > 160:
             shown = shown[:157] + "..."
         return (
@@ -1071,6 +1085,7 @@ class Ludvart:
             f'"{shown}". Do you approve? y(es) / n(o) / '
             "a(pprove everything from here on)."
         )
+
 
     def _resolve_inject_approval(self, approved: bool) -> None:
         """Finish a pending inject_input approval request and unblock the tool."""
