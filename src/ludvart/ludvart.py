@@ -1081,9 +1081,7 @@ class Ludvart:
         if len(shown) > 160:
             shown = shown[:157] + "..."
         return (
-            "Ludvart is trying to inject the following input into the terminal: "
-            f'"{shown}". Do you approve? y(es) / n(o) / '
-            "a(pprove everything from here on)."
+            f'WARNING: Approve terminal input: "{shown}"? [y]es / [n]o / [a]lways'
         )
 
 

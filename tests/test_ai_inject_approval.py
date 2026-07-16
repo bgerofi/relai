@@ -48,7 +48,7 @@ def test_inject_prompt_yes_executes_tool():
     t, out = _run_inject_tool(runner, {"text": "ls -la", "submit": True})
     assert _wait_pending(runner), "approval prompt did not appear"
     prompt = runner._panel.confirm_prompt
-    assert "Do you approve? y(es) / n(o) / a(pprove everything from here on)." in prompt
+    assert "WARNING: Approve terminal input: " in prompt
     assert '"ls -la"' in prompt
 
     runner._panel_input(b"y")
