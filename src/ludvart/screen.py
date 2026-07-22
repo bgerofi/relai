@@ -49,7 +49,7 @@ class LudvartScreen(pyte.HistoryScreen):
         (i.e. a full-screen app such as vim/htop/less is active).
     """
 
-    def __init__(self, columns: int, lines: int, history: int = 2000) -> None:
+    def __init__(self, columns: int, lines: int, history: int = 10000) -> None:
         # ratio=1.0 so a full screen's worth of lines is moved into history at
         # once when we page; we mainly use history.top for scrollback text.
         super().__init__(columns, lines, history=history, ratio=1.0)
