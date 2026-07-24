@@ -31,6 +31,19 @@ class BackendClient:
         self._channel.send(
             message(MsgType.SUBMIT, text=question, snapshot=snapshot)
         )
+        return self._pump(host)
+
+    def command(self, line: str, host: TerminalHost) -> None:
+        """Forward a slash command (e.g. ``model list``) and render its output.
+
+        Pumps the backend's ``PANEL_UPDATE`` frames to ``host`` until the
+        terminating ``REPLY``. ``line`` is the command without its leading '/'.
+        """
+        self._channel.send(message(MsgType.COMMAND, command=line))
+        self._pump(host)
+
+    def _pump(self, host: TerminalHost) -> str:
+        """Service backend frames until the turn/command ends with a ``REPLY``."""
         while True:
             msg = self._channel.recv()
             if msg is None:
@@ -76,3 +89,7 @@ class BackendClient:
             host.set_activity(msg.get("label", ""))
         elif kind == "info":
             host.add_info(msg.get("text", ""))
+        elif kind == "system":
+            host.add_system(msg.get("text", ""))
+        elif kind == "model":
+            host.set_model(msg.get("label", ""))

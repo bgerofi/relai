@@ -46,3 +46,14 @@ class TerminalHost(ABC):
     @abstractmethod
     def add_info(self, text: str) -> None:
         """Add a dim, non-fatal info/diagnostic line to the transcript."""
+
+    # -- optional capabilities (concrete no-op defaults so existing hosts and
+    #    test doubles keep working without implementing them) -----------------
+
+    def add_system(self, text: str) -> None:
+        """Add an ephemeral system line (e.g. command output). Defaults to info."""
+        self.add_info(text)
+
+    def set_model(self, label: str) -> None:
+        """Update the displayed active-model label (e.g. after ``/model use``)."""
+        # Default: nothing to display.

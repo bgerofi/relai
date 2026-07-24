@@ -177,13 +177,43 @@ def _run_with_backend(args, command: list[str]) -> int:
         host, folder = parse_backend_spec(spec)
         transport = ssh_backend(host, folder)
     try:
+        # The backend greets with HELLO carrying its active model + verification
+        # status; surface it the way the in-process startup reports verification.
+        label = _read_backend_hello(transport)
         return Ludvart(
-            command, prefix=args.prefix, backend_channel=transport.channel
+            command,
+            prefix=args.prefix,
+            backend_channel=transport.channel,
+            backend_label=label,
         ).run()
     except KeyboardInterrupt:
         return 130
     finally:
         transport.close()
+
+
+def _read_backend_hello(transport) -> str | None:
+    """Read the backend's HELLO frame and report its model/verification status.
+
+    Returns the active model label (or ``None``). A missing/blocking HELLO is
+    non-fatal: the session still starts and errors surface on the first ask.
+    """
+    try:
+        hello = transport.channel.recv()
+    except Exception as exc:  # noqa: BLE001 - report, do not crash startup
+        sys.stderr.write(f"ludvart: backend handshake failed: {exc}\n")
+        return None
+    if not hello:
+        sys.stderr.write("ludvart: backend closed before handshake\n")
+        return None
+    label = hello.get("active_label") or "backend"
+    if hello.get("verified"):
+        sys.stderr.write(f"ludvart: backend model {label}... ok\n")
+    else:
+        err = hello.get("verify_error") or "unknown error"
+        sys.stderr.write(f"ludvart: backend model {label}... FAILED ({err})\n")
+    return label
+
 
 
 

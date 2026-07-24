@@ -32,6 +32,8 @@ class RecordingHost(TerminalHost):
         self.narrations = []
         self.activities = []
         self.infos = []
+        self.systems = []
+        self.model_label = None
         self.snapshots = 0
 
     def snapshot(self):
@@ -50,6 +52,12 @@ class RecordingHost(TerminalHost):
 
     def add_info(self, text):
         self.infos.append(text)
+
+    def add_system(self, text):
+        self.systems.append(text)
+
+    def set_model(self, label):
+        self.model_label = label
 
 
 def _pipe_pair():
@@ -150,10 +158,102 @@ def test_subprocess_serve_end_to_end():
     print("forked `ludvart serve` runs a full turn over stdio: OK")
 
 
+def test_hello_reports_model_label_and_verification():
+    client_ch, backend_ch = _pipe_pair()
+    t = threading.Thread(
+        target=lambda: serve(backend_ch, llm=_FakeBackendLLM()), daemon=True
+    )
+    t.start()
+    hello = client_ch.recv()
+    assert hello["type"] == "hello"
+    assert hello["active_label"] == "custom:fake", hello
+    assert hello["verified"] is True
+    assert hello["verify_error"] is None
+    client_ch.close()
+    t.join(timeout=2)
+    backend_ch.close()
+    print("HELLO carries the active model label and verification status: OK")
+
+
+class _FakeManager:
+    """A minimal ModelManager stand-in for /model command tests."""
+
+    def __init__(self):
+        self.models = [
+            {"provider": "openai", "model": "gpt-x", "active": True},
+            {"provider": "anthropic", "model": "claude-y", "active": False},
+        ]
+        self.available = [True, True]
+        self.client = _FakeBackendLLM()
+        self.used = []
+
+    def active_index(self):
+        for i, m in enumerate(self.models):
+            if m.get("active"):
+                return i
+        return None
+
+    def describe(self):
+        return [
+            "  1) openai:gpt-x  [in use, available]",
+            "  2) anthropic:claude-y  [available]",
+        ]
+
+    def use(self, index, *, status=None, before_swap=None):
+        if status:
+            status("starting gateway")
+        for i, m in enumerate(self.models):
+            m["active"] = i == index
+        self.used.append(index)
+        self.client = _FakeBackendLLM()
+        return True, f"Now using model {index + 1}."
+
+
+def _run_command(manager, command_line):
+    """Drive one /model command over a loopback and collect the host output."""
+    client_ch, backend_ch = _pipe_pair()
+    t = threading.Thread(
+        target=lambda: serve(backend_ch, manager=manager), daemon=True
+    )
+    t.start()
+    client = BackendClient(client_ch)
+    host = RecordingHost()
+    assert client_ch.recv()["type"] == "hello"
+    client.command(command_line, host)
+    client_ch.close()
+    t.join(timeout=2)
+    backend_ch.close()
+    return host
+
+
+def test_model_list_command_over_backend():
+    manager = _FakeManager()
+    host = _run_command(manager, "model list")
+    joined = "\n".join(host.systems)
+    assert "Registered models (backend):" in joined
+    assert "openai:gpt-x" in joined
+    assert "anthropic:claude-y" in joined
+    print("/model list is served by the backend registry: OK")
+
+
+def test_model_use_command_switches_backend_model():
+    manager = _FakeManager()
+    host = _run_command(manager, "model use 2")
+    assert manager.used == [1], manager.used  # 0-based index for "2"
+    assert manager.models[1]["active"] is True
+    assert any("Now using" in s for s in host.systems), host.systems
+    # The client learns the new active label via a set_model notification.
+    assert host.model_label == "anthropic:claude-y", host.model_label
+    print("/model use switches the backend active model and label: OK")
+
+
 def main():
     test_loopback_turn_with_client_tool()
     test_loopback_plain_turn_without_tools()
     test_subprocess_serve_end_to_end()
+    test_hello_reports_model_label_and_verification()
+    test_model_list_command_over_backend()
+    test_model_use_command_switches_backend_model()
     print("\nALL backend RPC tests passed.")
 
 

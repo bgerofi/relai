@@ -129,12 +129,16 @@ class _FakeBackendLLM(LLMClient):
         )
 
 
-def _build_llm() -> LLMClient:
-    """Build the backend LLM: a fake for tests, else the active registered model."""
-    if os.environ.get("LUDVART_BACKEND_FAKE_LLM"):
-        return _FakeBackendLLM()
-    # Real path: activate the registered model on the backend host.
-    from .backend import build_backend
+def _build_manager():
+    """Activate the registered model on the backend, capturing verification.
+
+    Returns ``(manager, verify_error)``: a
+    :class:`~ludvart.backend.ModelManager` whose active client is built, and the
+    verification error string (or ``None`` on success). Verification is reported
+    to the client rather than fatal, so a bad active model can still be swapped
+    with ``/model use``.
+    """
+    from .backend import ModelManager, build_backend, verify_backend
     from .models import active_index, load_registry
 
     models = load_registry()
@@ -142,16 +146,117 @@ def _build_llm() -> LLMClient:
     if idx is None:
         raise RuntimeError("no active model registered on the backend")
     backend = build_backend(models[idx])
-    return backend.client
+    verify_error = None
+    try:
+        verify_backend(backend)
+    except Exception as exc:  # noqa: BLE001 - reported to the client, not fatal
+        verify_error = str(exc)
+    # Skip verifying the non-active models here to keep startup fast; they are
+    # truly verified on `/model use`.
+    available = [True] * len(models)
+    manager = ModelManager(models, available, backend.client, backend.gateway)
+    return manager, verify_error
 
 
-def serve(channel: FrameChannel, *, llm: LLMClient | None = None) -> None:
+def _manager_active_label(manager) -> str:
+    from .models import label
+
+    idx = manager.active_index()
+    if idx is None:
+        return "backend"
+    return label(manager.models[idx])
+
+
+def _client_label(llm: LLMClient) -> str:
+    return f"{getattr(llm, 'name', 'llm')}:{getattr(llm, 'model', 'model')}"
+
+
+def _handle_command(line: str, manager, core, channel: FrameChannel) -> None:
+    """Run a forwarded slash command (currently ``/model ...``) on the backend.
+
+    Emits result lines as ``PANEL_UPDATE`` system frames, switches the active
+    model on ``/model use``, and always sends a terminating ``REPLY`` so the
+    client's command call returns.
+    """
+    def emit(text: str) -> None:
+        channel.send(message(MsgType.PANEL_UPDATE, kind="system", text=text))
+
+    parts = line.split()
+    cmd = parts[0] if parts else ""
+    if cmd != "model":
+        emit(f"[ludvart] command not supported in backend mode: /{cmd}")
+        channel.send(message(MsgType.REPLY, text=""))
+        return
+    if manager is None:
+        emit("Model management is unavailable on this backend.")
+        channel.send(message(MsgType.REPLY, text=""))
+        return
+
+    sub = parts[1] if len(parts) > 1 else "list"
+    if sub == "list":
+        emit("Registered models (backend):")
+        for descr in manager.describe():
+            emit(descr)
+        emit("Use /model use <n>|<model> to switch.")
+    elif sub == "use":
+        if len(parts) < 3:
+            emit("Usage: /model use <n>|<model>")
+        else:
+            _do_model_use(parts[2], manager, core, channel, emit)
+    else:
+        emit(f"Only 'list' and 'use' are supported in backend mode (got {sub!r}).")
+    channel.send(message(MsgType.REPLY, text=""))
+
+
+def _do_model_use(token: str, manager, core, channel: FrameChannel, emit) -> None:
+    from .models import find_registration
+
+    idx = find_registration(manager.models, token)
+    if idx is None:
+        emit(f"No model matches {token!r}. See /model list.")
+        return
+
+    def status(note: str) -> None:
+        channel.send(message(MsgType.PANEL_UPDATE, kind="activity", label=note))
+
+    ok, msg = manager.use(idx, status=status)
+    emit(msg)
+    if ok:
+        core.llm = manager.client
+        channel.send(
+            message(MsgType.PANEL_UPDATE, kind="model", label=_manager_active_label(manager))
+        )
+
+
+def serve(
+    channel: FrameChannel,
+    *,
+    llm: LLMClient | None = None,
+    manager=None,
+) -> None:
     """Run the backend request loop on ``channel`` until the client disconnects.
 
-    One turn at a time: read a ``SUBMIT``, run it, send a ``REPLY``. A ``BYE`` or
-    a clean end-of-stream ends the loop.
+    One turn at a time: read a ``SUBMIT``, run it, send a ``REPLY``; forwarded
+    ``/model`` commands are handled via ``COMMAND``. A ``BYE`` or a clean
+    end-of-stream ends the loop. With ``llm`` given the model registry is
+    bypassed (used by tests); otherwise the active registered model is built.
     """
-    client = llm if llm is not None else _build_llm()
+    verify_error = None
+    if manager is not None:
+        client = manager.client
+        active_label = _manager_active_label(manager)
+    elif llm is None and os.environ.get("LUDVART_BACKEND_FAKE_LLM"):
+        # Hermetic offline path for tests: bypass the model registry entirely.
+        client = _FakeBackendLLM()
+        active_label = _client_label(client)
+    elif llm is not None:
+        client = llm
+        active_label = _client_label(llm)
+    else:
+        manager, verify_error = _build_manager()
+        client = manager.client
+        active_label = _manager_active_label(manager)
+
     host = RemoteTerminalHost(channel)
     core = AgentCore(
         client,
@@ -160,7 +265,16 @@ def serve(channel: FrameChannel, *, llm: LLMClient | None = None) -> None:
         tools=_prototype_tools(),
         client_tools=DEFAULT_CLIENT_TOOLS,
     )
-    channel.send(message(MsgType.HELLO, app="ludvart", protocol=1))
+    channel.send(
+        message(
+            MsgType.HELLO,
+            app="ludvart",
+            protocol=1,
+            active_label=active_label,
+            verified=verify_error is None,
+            verify_error=verify_error,
+        )
+    )
     while True:
         msg = channel.recv()
         if msg is None:
@@ -178,7 +292,13 @@ def serve(channel: FrameChannel, *, llm: LLMClient | None = None) -> None:
             except Exception as exc:  # noqa: BLE001 - report, keep serving
                 reply = f"[ludvart] backend error: {exc}"
             channel.send(message(MsgType.REPLY, text=reply))
+        elif kind == MsgType.COMMAND:
+            try:
+                _handle_command(msg.get("command", ""), manager, core, channel)
+            except ConnectionError:
+                return
         # Other client message kinds are ignored in the prototype.
+
 
 
 def serve_main(argv: Sequence[str] | None = None) -> int:

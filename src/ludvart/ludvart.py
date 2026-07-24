@@ -237,6 +237,17 @@ class _ClientTerminalHost(TerminalHost):
         if panel is not None:
             panel.add_info(text)
 
+    def add_system(self, text: str) -> None:
+        panel = self._app._panel
+        if panel is not None:
+            panel.add_system(text)
+
+    def set_model(self, label: str) -> None:
+        self._app._backend_label = label
+        panel = self._app._panel
+        if panel is not None:
+            panel.provider = label
+
 
 class Ludvart:
     """A transparent PTY relay around a single child command.
@@ -309,6 +320,7 @@ class Ludvart:
         llm: "LLMClient | None" = None,
         model_manager: "ModelManager | None" = None,
         backend_channel: "object | None" = None,
+        backend_label: str | None = None,
     ) -> None:
         self.command = list(command)
         self.prefix = prefix
@@ -326,6 +338,9 @@ class Ludvart:
             from .backend_client import BackendClient
 
             self._backend_client = BackendClient(backend_channel)
+        # Label shown for the backend's active model (updated by HELLO and by
+        # a backend-side /model use).
+        self._backend_label = backend_label
         # Guided ``/model add`` input flow state (None unless collecting fields).
         self._model_add: dict | None = None
         self._child_pid: int = -1
@@ -662,7 +677,7 @@ class Ludvart:
     def _ai_ask_callback(self):
         """Return the ``ask`` callable and a short provider label."""
         if self._backend_client is not None:
-            return self._ask_via_backend, "backend"
+            return self._ask_via_backend, (self._backend_label or "backend")
         if self.llm is None:
             def ask(_question: str) -> str:
                 return (
@@ -684,6 +699,21 @@ class Ludvart:
         host = _ClientTerminalHost(self)
         snapshot = self.snapshot_text()
         return self._backend_client.ask(question, snapshot, host=host)
+
+    def _forward_command_to_backend(self, command_line: str) -> None:
+        """Forward a slash command (without its '/') to the backend on a worker.
+
+        Runs on the panel's background action thread because a backend
+        ``/model use`` builds and verifies a model (and may launch a gateway),
+        which can block. Result lines are streamed back via the host adapter.
+        """
+        host = _ClientTerminalHost(self)
+
+        def worker() -> str:
+            self._backend_client.command(command_line, host)
+            return ""
+
+        self._start_action(worker, activity="Working")
 
     def _active_model_label(self) -> str:
         """A ``provider:model`` label for the model currently in use.
@@ -1370,6 +1400,11 @@ class Ludvart:
         parts = line[1:].split()
         cmd = parts[0] if parts else ""
         args = parts[1:]
+        # In backend (split) mode the registry lives on the backend, so model
+        # management is forwarded there rather than handled locally.
+        if self._backend_client is not None and cmd == "model":
+            self._forward_command_to_backend(line[1:])
+            return
         if cmd == "sessions":
             self._cmd_sessions(args)
         elif cmd == "model":
@@ -2073,7 +2108,7 @@ class Ludvart:
     def _deliver_system(self, result: str) -> None:
         """Deliver a deterministic action's status as an ephemeral system line."""
         panel = self._panel
-        if panel is None:
+        if panel is None or not result:
             return
         panel.add_system(result)
 
