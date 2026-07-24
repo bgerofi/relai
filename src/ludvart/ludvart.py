@@ -248,6 +248,13 @@ class _ClientTerminalHost(TerminalHost):
         if panel is not None:
             panel.provider = label
 
+    def set_transcript(self, messages: list) -> None:
+        msgs = [tuple(m) for m in messages]
+        self._app._panel_messages = msgs
+        panel = self._app._panel
+        if panel is not None:
+            panel.restore(msgs)
+
 
 class Ludvart:
     """A transparent PTY relay around a single child command.
@@ -1400,9 +1407,10 @@ class Ludvart:
         parts = line[1:].split()
         cmd = parts[0] if parts else ""
         args = parts[1:]
-        # In backend (split) mode the registry lives on the backend, so model
-        # management is forwarded there rather than handled locally.
-        if self._backend_client is not None and cmd == "model":
+        # In backend (split) mode the registry and sessions live on the backend,
+        # so model management and session commands are forwarded there rather
+        # than handled locally.
+        if self._backend_client is not None and cmd in ("model", "sessions"):
             self._forward_command_to_backend(line[1:])
             return
         if cmd == "sessions":

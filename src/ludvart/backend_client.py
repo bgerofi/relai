@@ -93,3 +93,5 @@ class BackendClient:
             host.add_system(msg.get("text", ""))
         elif kind == "model":
             host.set_model(msg.get("label", ""))
+        elif kind == "transcript":
+            host.set_transcript(msg.get("messages") or [])

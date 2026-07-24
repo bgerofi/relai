@@ -57,3 +57,10 @@ class TerminalHost(ABC):
     def set_model(self, label: str) -> None:
         """Update the displayed active-model label (e.g. after ``/model use``)."""
         # Default: nothing to display.
+
+    def set_transcript(self, messages: list) -> None:
+        """Replace the visible transcript (e.g. after ``/sessions load|new``).
+
+        ``messages`` is a list of ``[kind, text]`` pairs.
+        """
+        # Default: nothing to render.

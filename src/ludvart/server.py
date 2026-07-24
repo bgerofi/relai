@@ -172,40 +172,114 @@ def _client_label(llm: LLMClient) -> str:
 
 
 def _handle_command(line: str, manager, core, channel: FrameChannel) -> None:
-    """Run a forwarded slash command (currently ``/model ...``) on the backend.
+    """Run a forwarded slash command (``/model`` or ``/sessions``) on the backend.
 
-    Emits result lines as ``PANEL_UPDATE`` system frames, switches the active
-    model on ``/model use``, and always sends a terminating ``REPLY`` so the
-    client's command call returns.
+    Emits result lines as ``PANEL_UPDATE`` system frames, applies the effect
+    (switch model, load/new session), and always sends a terminating ``REPLY``
+    so the client's command call returns.
     """
     def emit(text: str) -> None:
         channel.send(message(MsgType.PANEL_UPDATE, kind="system", text=text))
 
     parts = line.split()
     cmd = parts[0] if parts else ""
-    if cmd != "model":
+    if cmd == "model":
+        _handle_model(parts[1:], manager, core, channel, emit)
+    elif cmd == "sessions":
+        _handle_sessions(parts[1:], core, channel, emit)
+    else:
         emit(f"[ludvart] command not supported in backend mode: /{cmd}")
-        channel.send(message(MsgType.REPLY, text=""))
-        return
+    channel.send(message(MsgType.REPLY, text=""))
+
+
+def _handle_model(args, manager, core, channel: FrameChannel, emit) -> None:
     if manager is None:
         emit("Model management is unavailable on this backend.")
-        channel.send(message(MsgType.REPLY, text=""))
         return
-
-    sub = parts[1] if len(parts) > 1 else "list"
+    sub = args[0] if args else "list"
     if sub == "list":
         emit("Registered models (backend):")
         for descr in manager.describe():
             emit(descr)
         emit("Use /model use <n>|<model> to switch.")
     elif sub == "use":
-        if len(parts) < 3:
+        if len(args) < 2:
             emit("Usage: /model use <n>|<model>")
         else:
-            _do_model_use(parts[2], manager, core, channel, emit)
+            _do_model_use(args[1], manager, core, channel, emit)
     else:
         emit(f"Only 'list' and 'use' are supported in backend mode (got {sub!r}).")
-    channel.send(message(MsgType.REPLY, text=""))
+
+
+def _handle_sessions(args, core, channel: FrameChannel, emit) -> None:
+    from .session import SessionStore, list_sessions
+
+    sub = args[0] if args else "list"
+    if sub == "list":
+        core.session_list = list_sessions()
+        if not core.session_list:
+            emit("No saved sessions yet.")
+            return
+        current = core.session.session_id if core.session is not None else None
+        for i, s in enumerate(core.session_list, 1):
+            marker = "*" if s["id"] == current else " "
+            preview = s.get("preview", "") or "(no messages)"
+            if len(preview) > 48:
+                preview = preview[:47] + "..."
+            emit(f"{marker}{i}. {s['id']}  ({s['count']} msgs)  {preview}")
+        emit("Use /sessions load <n>|<id> or /sessions new.")
+    elif sub == "load":
+        if len(args) < 2:
+            emit("Usage: /sessions load <n>|<id>")
+        else:
+            _do_session_load(args[1], core, channel, emit)
+    elif sub == "new":
+        core.reset()
+        core.session = SessionStore.create_new()
+        channel.send(message(MsgType.PANEL_UPDATE, kind="transcript", messages=[]))
+        emit(f"Started new session {core.session.session_id}.")
+    else:
+        emit(f"Unknown subcommand: /sessions {sub}")
+
+
+def _do_session_load(ref: str, core, channel: FrameChannel, emit) -> None:
+    from .session import (
+        SessionStore,
+        load_session,
+        neutralize_history,
+        provider_family,
+        working_history,
+    )
+
+    session_id = ref
+    if ref.isdigit():
+        idx = int(ref)
+        if not (1 <= idx <= len(core.session_list)):
+            emit(f"No session #{idx}. Run /sessions list first.")
+            return
+        session_id = core.session_list[idx - 1]["id"]
+    try:
+        data = load_session(session_id)
+    except (OSError, ValueError):
+        emit(f"Could not load session: {session_id}")
+        return
+    messages = [tuple(m) for m in data.get("messages", [])]
+    version = int(data.get("version", 1) or 1)
+    stored_family = provider_family(data.get("provider"))
+    neutral = neutralize_history(
+        list(data.get("llm_history", [])), version, stored_family
+    )
+    history = working_history(neutral)
+    core.resume(messages, history)
+    core.session = SessionStore.open_existing(session_id)
+    channel.send(
+        message(
+            MsgType.PANEL_UPDATE,
+            kind="transcript",
+            messages=[list(m) for m in messages],
+        )
+    )
+    emit(f"Loaded session {session_id} ({len(messages)} msgs).")
 
 
 def _do_model_use(token: str, manager, core, channel: FrameChannel, emit) -> None:
@@ -233,13 +307,16 @@ def serve(
     *,
     llm: LLMClient | None = None,
     manager=None,
+    session=None,
 ) -> None:
     """Run the backend request loop on ``channel`` until the client disconnects.
 
     One turn at a time: read a ``SUBMIT``, run it, send a ``REPLY``; forwarded
-    ``/model`` commands are handled via ``COMMAND``. A ``BYE`` or a clean
-    end-of-stream ends the loop. With ``llm`` given the model registry is
-    bypassed (used by tests); otherwise the active registered model is built.
+    ``/model`` and ``/sessions`` commands are handled via ``COMMAND``. A ``BYE``
+    or a clean end-of-stream ends the loop. With ``llm`` given the model registry
+    is bypassed (used by tests); otherwise the active registered model is built.
+    ``session`` persists the conversation under ``~/.ludvart`` on the backend;
+    it is created automatically only on the real path so tests stay hermetic.
     """
     verify_error = None
     if manager is not None:
@@ -256,6 +333,10 @@ def serve(
         manager, verify_error = _build_manager()
         client = manager.client
         active_label = _manager_active_label(manager)
+        if session is None:
+            from .session import SessionStore
+
+            session = SessionStore()
 
     host = RemoteTerminalHost(channel)
     core = AgentCore(
@@ -264,6 +345,7 @@ def serve(
         system_prompt=_SYSTEM_PROMPT,
         tools=_prototype_tools(),
         client_tools=DEFAULT_CLIENT_TOOLS,
+        session=session,
     )
     channel.send(
         message(

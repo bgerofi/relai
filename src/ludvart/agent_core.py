@@ -62,6 +62,7 @@ class AgentCore:
         tools: Sequence[ToolSpec] | None = None,
         client_tools: frozenset[str] = DEFAULT_CLIENT_TOOLS,
         max_tokens: int = 8192,
+        session=None,
     ) -> None:
         self.llm = llm
         self.host = host
@@ -73,6 +74,10 @@ class AgentCore:
         self.history: list[dict] = []
         #: Human-readable transcript pairs, for session persistence.
         self.transcript: list[tuple[str, str]] = []
+        #: Persistent conversation store on the backend (None disables saving).
+        self.session = session
+        #: Cache of the last `/sessions list`, for index -> id resolution.
+        self.session_list: list[dict] = []
 
     def run_turn(self, question: str, snapshot: str) -> str:
         """Run one user turn to completion and return the assistant's reply.
@@ -102,11 +107,35 @@ class AgentCore:
             self.history.append(neutral_assistant(turn))
             if not turn.tool_calls:
                 self.transcript.append(("ludvart", turn.text))
+                self._persist()
                 return turn.text
             for call in turn.tool_calls:
                 self.host.set_activity(f"Calling {call.name}")
                 output = self._run_tool(call)
                 self.history.append(neutral_tool_result(call, output))
+
+    def _persist(self) -> None:
+        """Save the conversation to the backend session store (best effort)."""
+        if self.session is None:
+            return
+        try:
+            self.session.save(
+                self.transcript,
+                self.history,
+                provider=getattr(self.llm, "name", None),
+            )
+        except Exception:  # noqa: BLE001 - persistence must never break a turn
+            pass
+
+    def resume(self, transcript, history) -> None:
+        """Replace the running conversation with a loaded session's state."""
+        self.transcript = [tuple(m) for m in transcript]
+        self.history = list(history)
+
+    def reset(self) -> None:
+        """Clear the conversation for a fresh session."""
+        self.transcript = []
+        self.history = []
 
     def _build_context(self) -> list[dict]:
         """Render the neutral history into the active provider's message shape."""
