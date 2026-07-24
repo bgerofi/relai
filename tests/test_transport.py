@@ -96,6 +96,18 @@ def test_ssh_backend_argv_quotes_folder():
     print("ssh_backend_argv shell-quotes the folder: OK")
 
 
+def test_ssh_backend_argv_injects_remote_env():
+    argv = ssh_backend_argv(
+        "h", "/opt/ludvart", remote_env={"LUDVART_BACKEND_FAKE_LLM": "1"}
+    )
+    remote = argv[-1]
+    assert "env LUDVART_BACKEND_FAKE_LLM=1 .venv/bin/python -m ludvart serve" in remote, remote
+    # Env values are quoted too.
+    argv2 = ssh_backend_argv("h", "/o", remote_env={"K": "a b"})
+    assert "env K='a b' " in argv2[-1], argv2[-1]
+    print("ssh_backend_argv injects and quotes remote env: OK")
+
+
 def test_transport_roundtrip_and_cleanup():
     t = _echo_transport()
     try:
@@ -168,6 +180,7 @@ def main():
     test_local_backend_argv()
     test_ssh_backend_argv()
     test_ssh_backend_argv_quotes_folder()
+    test_ssh_backend_argv_injects_remote_env()
     test_transport_roundtrip_and_cleanup()
     test_transport_close_signals_eof()
     test_transport_force_kills_a_hung_backend()

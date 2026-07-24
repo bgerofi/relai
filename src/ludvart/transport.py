@@ -157,18 +157,27 @@ def local_backend(
     )
 
 
-def ssh_backend_argv(host: str, folder: str) -> list[str]:
+def ssh_backend_argv(
+    host: str, folder: str, *, remote_env: dict[str, str] | None = None
+) -> list[str]:
     """Argv that runs the backend on ``host`` from the checkout at ``folder``.
 
     Uses the checkout's own virtualenv so the remote side matches the repo the
     user pointed at. ``-T`` disables PTY allocation (we want a clean binary
     stdio pipe, not a terminal), and ``-o BatchMode=yes`` fails fast instead of
     prompting when key-based auth is not set up.
+
+    SSH does not forward the local environment; ``remote_env`` optionally sets
+    variables for the backend via ``env NAME=VALUE ...`` (each value is
+    shell-quoted).
     """
-    remote = (
-        f"cd {_sh_quote(folder)} && "
-        "exec .venv/bin/python -m ludvart serve"
-    )
+    cmd = ".venv/bin/python -m ludvart serve"
+    if remote_env:
+        assigns = " ".join(
+            f"{name}={_sh_quote(str(value))}" for name, value in remote_env.items()
+        )
+        cmd = f"env {assigns} {cmd}"
+    remote = f"cd {_sh_quote(folder)} && exec {cmd}"
     return [
         "ssh",
         "-T",
@@ -183,10 +192,13 @@ def ssh_backend(
     host: str,
     folder: str,
     *,
+    remote_env: dict[str, str] | None = None,
     stderr: IO | int | None = None,
 ) -> Transport:
     """Run the backend on a remote host over SSH and connect to it."""
-    return spawn_transport(ssh_backend_argv(host, folder), stderr=stderr)
+    return spawn_transport(
+        ssh_backend_argv(host, folder, remote_env=remote_env), stderr=stderr
+    )
 
 
 def _sh_quote(value: str) -> str:
