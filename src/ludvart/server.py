@@ -259,7 +259,12 @@ def _handle_model(args, manager, core, channel: FrameChannel, emit) -> None:
 
 
 def _handle_sessions(args, core, channel: FrameChannel, emit) -> None:
-    from .session import SessionStore, list_sessions
+    from .session import (
+        SessionStore,
+        list_sessions,
+        parse_rename_args,
+        rename_session,
+    )
 
     sub = args[0] if args else "list"
     if sub == "list":
@@ -270,11 +275,11 @@ def _handle_sessions(args, core, channel: FrameChannel, emit) -> None:
         current = core.session.session_id if core.session is not None else None
         for i, s in enumerate(core.session_list, 1):
             marker = "*" if s["id"] == current else " "
-            preview = s.get("preview", "") or "(no messages)"
-            if len(preview) > 48:
-                preview = preview[:47] + "..."
-            emit(f"{marker}{i}. {s['id']}  ({s['count']} msgs)  {preview}")
-        emit("Use /sessions load <n>|<id> or /sessions new.")
+            label = s.get("title") or s.get("preview") or "(no messages)"
+            if len(label) > 48:
+                label = label[:47] + "..."
+            emit(f"{marker}{i}. {s['id']}  ({s['count']} msgs)  {label}")
+        emit('Use /sessions load <n>|<id>, new, or rename <id> "Title".')
     elif sub == "load":
         if len(args) < 2:
             emit("Usage: /sessions load <n>|<id>")
@@ -285,6 +290,21 @@ def _handle_sessions(args, core, channel: FrameChannel, emit) -> None:
         core.session = SessionStore.create_new()
         channel.send(message(MsgType.PANEL_UPDATE, kind="transcript", messages=[]))
         emit(f"Started new session {core.session.session_id}.")
+    elif sub == "rename":
+        parsed = parse_rename_args(" ".join(args[1:]))
+        if parsed is None:
+            emit('Usage: /sessions rename <id> "New title"')
+            return
+        session_id, title = parsed
+        if not rename_session(session_id, title):
+            emit(f"Could not rename session: {session_id}")
+            return
+        if core.session is not None and core.session.session_id == session_id:
+            core.session.title = title
+        if title:
+            emit(f'Renamed {session_id} to "{title}".')
+        else:
+            emit(f"Cleared the title of {session_id}.")
     else:
         emit(f"Unknown subcommand: /sessions {sub}")
 
@@ -319,6 +339,7 @@ def _do_session_load(ref: str, core, channel: FrameChannel, emit) -> None:
     history = working_history(neutral)
     core.resume(messages, history)
     core.session = SessionStore.open_existing(session_id)
+    core.session.title = data.get("title", "") or ""
     channel.send(
         message(
             MsgType.PANEL_UPDATE,

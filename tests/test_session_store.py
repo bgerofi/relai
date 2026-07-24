@@ -15,8 +15,10 @@ from ludvart.session import (
     complete_slash,
     list_sessions,
     load_session,
+    parse_rename_args,
     persisted_messages,
     provider_family,
+    rename_session,
     sanitize_history,
     sessions_root,
 )
@@ -486,6 +488,88 @@ def test_complete_slash():
     print("complete_slash: OK")
 
 
+def test_save_writes_empty_title_by_default():
+    root = Path(tempfile.mkdtemp())
+    store = SessionStore(root=root, started_at=datetime(2026, 7, 2, 8, 5, 9, tzinfo=timezone.utc))
+    store.save([("you", "hi")], [])
+    data = json.loads(store.path.read_text())
+    assert data["title"] == "", data
+    print("save writes an empty title by default: OK")
+
+
+def test_save_persists_set_title():
+    root = Path(tempfile.mkdtemp())
+    store = SessionStore(root=root, started_at=datetime(2026, 7, 2, 8, 5, 9, tzinfo=timezone.utc))
+    store.title = "Refund bug hunt"
+    store.save([("you", "hi")], [])
+    data = json.loads(store.path.read_text())
+    assert data["title"] == "Refund bug hunt", data
+    summaries = list_sessions(root=root)
+    assert summaries[0]["title"] == "Refund bug hunt", summaries
+    print("save persists a set title and list_sessions returns it: OK")
+
+
+def test_list_sessions_backward_compatible_without_title():
+    # A session file written before titles existed has no 'title' key.
+    root = Path(tempfile.mkdtemp())
+    store = SessionStore(root=root, started_at=datetime(2026, 7, 2, 8, 5, 9, tzinfo=timezone.utc))
+    store.save([("you", "old")], [])
+    data = json.loads(store.path.read_text())
+    del data["title"]
+    store.path.write_text(json.dumps(data))
+    summaries = list_sessions(root=root)
+    assert summaries[0]["title"] == "", summaries
+    assert summaries[0]["preview"] == "old"
+    print("list_sessions defaults title to '' for pre-title files: OK")
+
+
+def test_rename_session_sets_and_clears():
+    root = Path(tempfile.mkdtemp())
+    store = SessionStore(root=root, started_at=datetime(2026, 7, 2, 8, 5, 9, tzinfo=timezone.utc))
+    store.save([("you", "first question")], [{"role": "user", "content": "x"}])
+    sid = store.session_id
+
+    assert rename_session(sid, "My title", root=root) is True
+    data = load_session(sid, root=root)
+    assert data["title"] == "My title"
+    # Other fields are preserved by the rewrite.
+    assert data["messages"] == [["you", "first question"]]
+    assert data["llm_history"] == [{"role": "user", "content": "x"}]
+
+    # Clearing reverts to an empty title.
+    assert rename_session(sid, "", root=root) is True
+    assert load_session(sid, root=root)["title"] == ""
+    print("rename_session sets and clears the title, preserving data: OK")
+
+
+def test_rename_missing_session_returns_false():
+    root = Path(tempfile.mkdtemp())
+    assert rename_session("2099-01-01/00_00_00", "nope", root=root) is False
+    print("rename_session returns False for a missing session: OK")
+
+
+def test_parse_rename_args():
+    assert parse_rename_args('2026-07-02/08_05_09 "New title"') == (
+        "2026-07-02/08_05_09",
+        "New title",
+    )
+    # Unquoted single-word title works too.
+    assert parse_rename_args("id title") == ("id", "title")
+    # Missing title -> None (caller prints usage).
+    assert parse_rename_args("only-id") is None
+    assert parse_rename_args("") is None
+    # Malformed quoting -> None rather than raising.
+    assert parse_rename_args('id "unterminated') is None
+    print("parse_rename_args handles quotes and incomplete input: OK")
+
+
+def test_complete_slash_rename():
+    assert complete_slash("/sessions r") == "/sessions rename "
+    # 'l' is still ambiguous (list/load), 'n' completes to new.
+    assert complete_slash("/sessions n") == "/sessions new "
+    print("complete_slash completes /sessions rename: OK")
+
+
 if __name__ == "__main__":
     test_path_layout_utc()
     test_path_layout_converts_to_utc()
@@ -508,4 +592,11 @@ if __name__ == "__main__":
     test_cross_provider_save_load_matrix()
     test_openai_custom_same_family_roundtrip()
     test_complete_slash()
+    test_save_writes_empty_title_by_default()
+    test_save_persists_set_title()
+    test_list_sessions_backward_compatible_without_title()
+    test_rename_session_sets_and_clears()
+    test_rename_missing_session_returns_false()
+    test_parse_rename_args()
+    test_complete_slash_rename()
     print("\nALL session-store tests passed.")

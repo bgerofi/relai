@@ -200,12 +200,52 @@ def test_sessions_load_by_index_over_backend():
     print("/sessions load <n> resolves the index on the backend: OK")
 
 
+def test_sessions_rename_over_backend():
+    from ludvart.session import load_session
+
+    with _tmp_sessions():
+        saved = SessionStore.create_new()
+        saved.save(
+            [("you", "rename me"), ("ludvart", "ok")],
+            [{"role": "user", "content": "rename me"}],
+            provider="custom",
+        )
+        sid = saved.session_id
+        current = SessionStore.create_new()
+        host = _run_command(f'sessions rename {sid} "Renamed title"', current)
+
+        assert any("Renamed" in s for s in host.systems), host.systems
+        # The title is persisted on the backend store.
+        assert load_session(sid)["title"] == "Renamed title"
+    print("/sessions rename sets the title on the backend store: OK")
+
+
+def test_sessions_list_shows_title_over_backend():
+    with _tmp_sessions():
+        saved = SessionStore.create_new()
+        saved.title = "Nice title"
+        saved.save(
+            [("you", "the first line preview")],
+            [{"role": "user", "content": "x"}],
+            provider="custom",
+        )
+        current = SessionStore.create_new()
+        host = _run_command("sessions list", current)
+        joined = "\n".join(host.systems)
+        assert "Nice title" in joined, joined
+        # The title takes precedence over the message preview.
+        assert "the first line preview" not in joined, joined
+    print("/sessions list shows the title instead of the preview: OK")
+
+
 def main():
     test_agent_core_persists_to_backend_session()
     test_sessions_list_over_backend()
     test_sessions_new_over_backend()
     test_sessions_load_over_backend()
     test_sessions_load_by_index_over_backend()
+    test_sessions_rename_over_backend()
+    test_sessions_list_shows_title_over_backend()
     print("\nALL backend session tests passed.")
 
 

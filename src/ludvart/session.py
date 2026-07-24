@@ -124,6 +124,8 @@ class SessionStore:
             self.session_id = f"{day}/{clock}"
         self.dir = self.root / self.session_id
         self.path = self.dir / _CONV_NAME
+        # Optional, user-assigned display title (empty = fall back to preview).
+        self.title = ""
 
     @classmethod
     def open_existing(
@@ -166,6 +168,7 @@ class SessionStore:
             "started_at": _iso(self.started_at),
             "updated_at": _iso(_utc_now()),
             "provider": provider,
+            "title": getattr(self, "title", "") or "",
             "messages": [list(m) for m in persisted_messages(messages)],
             "llm_history": llm_history,
         }
@@ -214,11 +217,53 @@ def list_sessions(root: Path | str | None = None) -> list[dict[str, Any]]:
                     "id": data.get("session_id", f"{day.name}/{sess.name}"),
                     "started_at": data.get("started_at", ""),
                     "updated_at": data.get("updated_at", ""),
+                    "title": data.get("title", "") or "",
                     "count": len(messages),
                     "preview": preview,
                 }
             )
     return out
+
+
+def rename_session(
+    session_id: str, title: str, root: Path | str | None = None
+) -> bool:
+    """Set the display ``title`` on a stored session (atomically). 
+
+    Returns ``True`` on success, ``False`` if the session file is missing or
+    unreadable. An empty ``title`` clears the title (reverting to the preview).
+    """
+    base = Path(root) if root is not None else sessions_root()
+    conv = base / session_id / _CONV_NAME
+    try:
+        data = json.loads(conv.read_text())
+    except (OSError, ValueError):
+        return False
+    data["title"] = title
+    tmp = conv.parent / (_CONV_NAME + ".tmp")
+    try:
+        tmp.write_text(json.dumps(data, indent=2, ensure_ascii=False))
+        os.replace(tmp, conv)
+    except OSError:
+        return False
+    return True
+
+
+def parse_rename_args(text: str) -> tuple[str, str] | None:
+    """Parse ``<session_id> "New title"`` (quote-aware) into ``(id, title)``.
+
+    Returns ``None`` when fewer than two tokens are present or the quoting is
+    malformed, so callers can print a usage hint.
+    """
+    import shlex
+
+    try:
+        parts = shlex.split(text)
+    except ValueError:
+        return None
+    if len(parts) < 2:
+        return None
+    return parts[0], parts[1]
 
 
 def load_session(
@@ -380,7 +425,7 @@ SLASH_COMMANDS: dict[str, list[str]] = {
     "model": ["add", "list", "remove", "use"],
     "perf": ["dump", "summary"],
     "revoke_approval": [],
-    "sessions": ["list", "load", "new"],
+    "sessions": ["list", "load", "new", "rename"],
 }
 
 # One-line usage + description for each command, shown by ``/help``. Ordered the
@@ -405,6 +450,10 @@ SLASH_COMMAND_HELP: list[tuple[str, str]] = [
     ("/sessions list", "List saved conversation sessions (current is marked *)."),
     ("/sessions load <n>|<id>", "Load and resume a saved session by number or id."),
     ("/sessions new", "Start a fresh, empty conversation in a new session file."),
+    (
+        "/sessions rename <id> \"Title\"",
+        "Give a saved session a title so it is easy to find in the list.",
+    ),
     ("/model list", "List registered models (in-use and available are marked)."),
     ("/model add", "Register a new model endpoint (guided prompts, then verify)."),
     ("/model use <n>|<model>", "Switch to another registered, available model."),

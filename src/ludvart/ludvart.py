@@ -47,7 +47,9 @@ from .session import (
     load_session,
     neutralize_history,
     NEUTRAL_SESSIONS_VERSION,
+    parse_rename_args,
     provider_family,
+    rename_session,
     working_history,
 )
 from .llm import ToolSpec
@@ -1654,13 +1656,15 @@ class Ludvart:
             current = self._session.session_id if self._session else None
             for i, s in enumerate(self._session_list, 1):
                 marker = "*" if s["id"] == current else " "
-                preview = s.get("preview", "") or "(no messages)"
-                if len(preview) > 48:
-                    preview = preview[:47] + "\u2026"
+                label = s.get("title") or s.get("preview") or "(no messages)"
+                if len(label) > 48:
+                    label = label[:47] + "\u2026"
                 panel.add_system(
-                    f"{marker}{i}. {s['id']}  ({s['count']} msgs)  {preview}"
+                    f"{marker}{i}. {s['id']}  ({s['count']} msgs)  {label}"
                 )
-            panel.add_system("Use /sessions load <n> or /sessions load <id>.")
+            panel.add_system(
+                'Use /sessions load <n>|<id>, or rename <id> "Title".'
+            )
         elif sub == "load":
             if len(args) < 2:
                 panel.add_system("Usage: /sessions load <n>|<id>")
@@ -1668,8 +1672,29 @@ class Ludvart:
             self._load_session(args[1])
         elif sub == "new":
             self._new_session()
+        elif sub == "rename":
+            parsed = parse_rename_args(" ".join(args[1:]))
+            if parsed is None:
+                panel.add_system('Usage: /sessions rename <id> "New title"')
+                return
+            self._rename_session(*parsed)
         else:
             panel.add_system(f"Unknown subcommand: /sessions {sub}")
+
+    def _rename_session(self, session_id: str, title: str) -> None:
+        """Set a saved session's display title (and the live store if current)."""
+        panel = self._panel
+        if panel is None:
+            return
+        if not rename_session(session_id, title):
+            panel.add_system(f"Could not rename session: {session_id}")
+            return
+        if self._session is not None and self._session.session_id == session_id:
+            self._session.title = title
+        if title:
+            panel.add_system(f'Renamed {session_id} to "{title}".')
+        else:
+            panel.add_system(f"Cleared the title of {session_id}.")
 
     def _new_session(self) -> None:
         """Start a fresh, empty conversation in a brand-new session file.
@@ -2020,6 +2045,7 @@ class Ludvart:
         panel.restore(messages)
         # Continue writing into the loaded session's file from now on.
         self._session = SessionStore.open_existing(session_id)
+        self._session.title = data.get("title", "") or ""
         note = " (older session migrated to the portable format)" if migrated else ""
         panel.add_system(
             f"Loaded session {session_id} ({len(messages)} msgs).{note}"
