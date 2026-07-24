@@ -34,6 +34,7 @@ from .overlay import ScrollbackViewer
 from .panel import AiPanel
 from .render import Compositor, render_row
 from .screen import LudvartScreen
+from .terminal_host import TerminalHost
 from .helper_src import LUDVART_HELPER_VERSION, helper_install_command
 from .mcp import McpManager
 from .session import (
@@ -200,6 +201,43 @@ class _AskCancelled(Exception):
     """Raised inside the agent loop to unwind a user-cancelled LLM request."""
 
 
+class _ClientTerminalHost(TerminalHost):
+    """Adapts a running :class:`Ludvart` client to the :class:`TerminalHost` API.
+
+    Used only in backend (split) mode: the backend calls these methods over the
+    wire and this adapter maps them onto the live terminal -- the screen
+    snapshot, the terminal tools (with their approval gate), and the panel.
+    """
+
+    def __init__(self, app: "Ludvart") -> None:
+        self._app = app
+
+    def snapshot(self) -> str:
+        return self._app.snapshot_text()
+
+    def run_terminal_tool(self, name: str, args: dict) -> str:
+        if name == "inject_input":
+            return self._app._tool_inject_input(args)
+        if name == "capture_screen_history":
+            return self._app._tool_capture_screen_history(args)
+        return f"[ludvart] unknown terminal tool: {name}"
+
+    def narrate(self, text: str) -> None:
+        panel = self._app._panel
+        if panel is not None:
+            panel.interim = text
+
+    def set_activity(self, label: str) -> None:
+        panel = self._app._panel
+        if panel is not None:
+            panel.activity = label
+
+    def add_info(self, text: str) -> None:
+        panel = self._app._panel
+        if panel is not None:
+            panel.add_info(text)
+
+
 class Ludvart:
     """A transparent PTY relay around a single child command.
 
@@ -270,6 +308,7 @@ class Ludvart:
         summon: bytes = DEFAULT_SUMMON,
         llm: "LLMClient | None" = None,
         model_manager: "ModelManager | None" = None,
+        backend_channel: "object | None" = None,
     ) -> None:
         self.command = list(command)
         self.prefix = prefix
@@ -279,6 +318,14 @@ class Ludvart:
         # owns the active client, so it wins over the ``llm`` argument.
         self._models = model_manager
         self.llm = model_manager.client if model_manager is not None else llm
+        # When a backend channel is supplied, the agent loop runs in a separate
+        # process: asks are routed over the wire and this process only provides
+        # the terminal (see :meth:`_ask_via_backend`).
+        self._backend_client = None
+        if backend_channel is not None:
+            from .backend_client import BackendClient
+
+            self._backend_client = BackendClient(backend_channel)
         # Guided ``/model add`` input flow state (None unless collecting fields).
         self._model_add: dict | None = None
         self._child_pid: int = -1
@@ -614,6 +661,8 @@ class Ludvart:
 
     def _ai_ask_callback(self):
         """Return the ``ask`` callable and a short provider label."""
+        if self._backend_client is not None:
+            return self._ask_via_backend, "backend"
         if self.llm is None:
             def ask(_question: str) -> str:
                 return (
@@ -624,6 +673,17 @@ class Ludvart:
 
             return ask, "no LLM"
         return self._ask_llm, self._active_model_label()
+
+    def _ask_via_backend(self, question: str) -> str:
+        """Run one ask through the backend, serving its terminal requests locally.
+
+        The backend owns the conversation and the LLM; this process captures the
+        ask-time snapshot, then answers the backend's snapshot/terminal-tool
+        requests (via a client-side host adapter) and renders its narration.
+        """
+        host = _ClientTerminalHost(self)
+        snapshot = self.snapshot_text()
+        return self._backend_client.ask(question, snapshot, host=host)
 
     def _active_model_label(self) -> str:
         """A ``provider:model`` label for the model currently in use.

@@ -67,6 +67,13 @@ class MsgType:
     TOOL_INVOKE = "tool_invoke"
     #: C->B: the result of a client-side tool call, keyed by call_id.
     TOOL_RESULT = "tool_result"
+    #: B->C: a value-returning call on the client's terminal host (snapshot,
+    #: terminal tool), keyed by call_id; the client answers with RESPONSE.
+    REQUEST = "request"
+    #: C->B: the result of a REQUEST, keyed by the same call_id.
+    RESPONSE = "response"
+    #: B->C: the final assistant reply that ends one submitted turn.
+    REPLY = "reply"
     #: B->C: structured panel-state update for the client to render.
     PANEL_UPDATE = "panel_update"
     #: B->C: ask the user something (approval / steer / confirm) on the panel.

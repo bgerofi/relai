@@ -78,6 +78,15 @@ def _restore_handlers(handlers) -> None:
 
 
 def main(argv: list[str] | None = None) -> int:
+    # Backend mode: `ludvart serve` runs the agent-loop server on stdin/stdout
+    # (spawned by a client locally or over SSH). It speaks only the framed
+    # protocol on stdout, so it must be dispatched before any normal output.
+    raw = sys.argv[1:] if argv is None else argv
+    if raw and raw[0] == "serve":
+        from .server import serve_main
+
+        return serve_main(raw[1:])
+
     parser = argparse.ArgumentParser(
         prog="ludvart",
         description=(
@@ -103,6 +112,17 @@ def main(argv: list[str] | None = None) -> int:
         help="Run as a plain relay without any LLM (skip provider setup/check).",
     )
     parser.add_argument(
+        "--backend",
+        metavar="SPEC",
+        default=None,
+        help=(
+            "Run the agent loop in a separate backend process. 'local' forks it "
+            "on this host; 'host:folder' runs it on an SSH-reachable host from "
+            "the ludvart checkout at 'folder' (which has a .venv). The terminal "
+            "stays local; only structured messages cross the link."
+        ),
+    )
+    parser.add_argument(
         "command",
         nargs=argparse.REMAINDER,
         help="Command (and args) to run. Prefix with '--' to pass flags through.",
@@ -115,6 +135,11 @@ def main(argv: list[str] | None = None) -> int:
         command = command[1:]
     if not command:
         command = [_default_shell()]
+
+    # Split mode: the agent loop runs in a backend process; the client keeps the
+    # terminal. No local model activation is needed (the backend owns the LLM).
+    if args.backend:
+        return _run_with_backend(args, command)
 
     manager = None
     if not args.no_llm:
@@ -134,6 +159,32 @@ def main(argv: list[str] | None = None) -> int:
         if manager is not None and manager.gateway is not None:
             manager.gateway.stop()
         _restore_handlers(handlers)
+
+
+def _run_with_backend(args, command: list[str]) -> int:
+    """Run a client session whose agent loop lives in a backend process.
+
+    The backend is either forked locally (``--backend local``) or spawned on an
+    SSH-reachable host (``--backend host:folder``). The transport is always
+    closed on exit so the backend process is never leaked.
+    """
+    from .transport import local_backend, parse_backend_spec, ssh_backend
+
+    spec = args.backend
+    if spec == "local":
+        transport = local_backend()
+    else:
+        host, folder = parse_backend_spec(spec)
+        transport = ssh_backend(host, folder)
+    try:
+        return Ludvart(
+            command, prefix=args.prefix, backend_channel=transport.channel
+        ).run()
+    except KeyboardInterrupt:
+        return 130
+    finally:
+        transport.close()
+
 
 
 def _setup_llm() -> ModelManager | None:
