@@ -129,33 +129,80 @@ class _FakeBackendLLM(LLMClient):
         )
 
 
-def _build_manager():
+def _build_manager(status=None):
     """Activate the registered model on the backend, capturing verification.
 
     Returns ``(manager, verify_error)``: a
     :class:`~ludvart.backend.ModelManager` whose active client is built, and the
-    verification error string (or ``None`` on success). Verification is reported
-    to the client rather than fatal, so a bad active model can still be swapped
-    with ``/model use``.
+    verification error string (or ``None`` on success). ``status`` (optional)
+    receives progress notes -- the active model's verification, the Copilot
+    gateway launch, and each other model's verification -- so the client can show
+    startup progress the way the in-process path prints it to stderr.
     """
     from .backend import ModelManager, build_backend, verify_backend
-    from .models import active_index, load_registry
+    from .models import active_index, label, load_registry
+
+    def note(msg: str) -> None:
+        if status is not None:
+            status(msg)
 
     models = load_registry()
     idx = active_index(models) if models else None
     if idx is None:
         raise RuntimeError("no active model registered on the backend")
-    backend = build_backend(models[idx])
+    active = models[idx]
+    note(f"verifying {label(active)} (model {active['model']!r})...")
+    backend = build_backend(active, status=note)
     verify_error = None
     try:
         verify_backend(backend)
+        note(f"{label(active)}: ok")
     except Exception as exc:  # noqa: BLE001 - reported to the client, not fatal
         verify_error = str(exc)
-    # Skip verifying the non-active models here to keep startup fast; they are
-    # truly verified on `/model use`.
-    available = [True] * len(models)
+        note(f"{label(active)}: FAILED ({exc})")
+    available = _verify_others(models, idx, note)
+    available[idx] = True
     manager = ModelManager(models, available, backend.client, backend.gateway)
     return manager, verify_error
+
+
+def _verify_others(models, active_idx, note) -> list[bool]:
+    """Verify every non-active model, reporting each via ``note``.
+
+    Direct providers get a tiny live request; Copilot models are marked available
+    when the gateway is installed and authorized (they are only truly started on
+    ``/model use``), mirroring the in-process startup check.
+    """
+    from .llm import build_client
+    from .models import is_copilot, label, registration_to_config
+
+    available = [False] * len(models)
+    for i, reg in enumerate(models):
+        if i == active_idx:
+            available[i] = True
+            continue
+        note(f"verifying {label(reg)}...")
+        if is_copilot(reg):
+            ok = _copilot_ready()
+            available[i] = ok
+            note(f"{label(reg)}: {'ok' if ok else 'unavailable'}")
+            continue
+        try:
+            client = build_client(registration_to_config(reg))
+            client.verify()
+            available[i] = True
+            note(f"{label(reg)}: ok")
+        except Exception as exc:  # noqa: BLE001 - availability probe
+            available[i] = False
+            note(f"{label(reg)}: unavailable ({exc})")
+    return available
+
+
+def _copilot_ready() -> bool:
+    """Whether a Copilot backend could start (installed + authorized)."""
+    from .gateway import copilot_authenticated, litellm_available
+
+    return litellm_available() and copilot_authenticated()
 
 
 def _manager_active_label(manager) -> str:
@@ -330,7 +377,12 @@ def serve(
         client = llm
         active_label = _client_label(llm)
     else:
-        manager, verify_error = _build_manager()
+        # Real path: report build/verify progress (gateway launch, per-model
+        # verification) as LOG frames so the client can show it at startup.
+        def _startup(msg: str) -> None:
+            channel.send(message(MsgType.LOG, text=msg))
+
+        manager, verify_error = _build_manager(status=_startup)
         client = manager.client
         active_label = _manager_active_label(manager)
         if session is None:

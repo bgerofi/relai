@@ -193,26 +193,39 @@ def _run_with_backend(args, command: list[str]) -> int:
 
 
 def _read_backend_hello(transport) -> str | None:
-    """Read the backend's HELLO frame and report its model/verification status.
+    """Stream the backend's startup progress and read its HELLO frame.
 
-    Returns the active model label (or ``None``). A missing/blocking HELLO is
-    non-fatal: the session still starts and errors surface on the first ask.
+    Before HELLO the backend sends LOG frames for the gateway launch and each
+    model's verification; print them to stderr the way the in-process startup
+    reports verification. Returns the active model label (or ``None``). A
+    missing/blocking HELLO is non-fatal: the session still starts and errors
+    surface on the first ask.
     """
-    try:
-        hello = transport.channel.recv()
-    except Exception as exc:  # noqa: BLE001 - report, do not crash startup
-        sys.stderr.write(f"ludvart: backend handshake failed: {exc}\n")
-        return None
-    if not hello:
-        sys.stderr.write("ludvart: backend closed before handshake\n")
-        return None
-    label = hello.get("active_label") or "backend"
-    if hello.get("verified"):
-        sys.stderr.write(f"ludvart: backend model {label}... ok\n")
-    else:
-        err = hello.get("verify_error") or "unknown error"
-        sys.stderr.write(f"ludvart: backend model {label}... FAILED ({err})\n")
-    return label
+    from .protocol import MsgType
+
+    while True:
+        try:
+            msg = transport.channel.recv()
+        except Exception as exc:  # noqa: BLE001 - report, do not crash startup
+            sys.stderr.write(f"ludvart: backend handshake failed: {exc}\n")
+            return None
+        if not msg:
+            sys.stderr.write("ludvart: backend closed before handshake\n")
+            return None
+        kind = msg.get("type")
+        if kind == MsgType.LOG:
+            sys.stderr.write(f"ludvart: {msg.get('text', '')}\n")
+            sys.stderr.flush()
+            continue
+        if kind == MsgType.HELLO:
+            label = msg.get("active_label") or "backend"
+            if msg.get("verified"):
+                sys.stderr.write(f"ludvart: backend model {label}... ok\n")
+            else:
+                err = msg.get("verify_error") or "unknown error"
+                sys.stderr.write(f"ludvart: backend model {label}... FAILED ({err})\n")
+            return label
+        # Ignore any other pre-session frames.
 
 
 
