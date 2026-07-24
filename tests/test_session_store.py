@@ -19,6 +19,7 @@ from ludvart.session import (
     persisted_messages,
     provider_family,
     rename_session,
+    resolve_session_ref,
     sanitize_history,
     sessions_root,
 )
@@ -553,14 +554,30 @@ def test_parse_rename_args():
         "2026-07-02/08_05_09",
         "New title",
     )
-    # Unquoted single-word title works too.
+    # Unquoted single-word title works.
     assert parse_rename_args("id title") == ("id", "title")
+    # Unquoted multi-word title is taken whole (no quoting required).
+    assert parse_rename_args("150 TCP timeout issue") == ("150", "TCP timeout issue")
+    # Single quotes are stripped as well.
+    assert parse_rename_args("id 'quoted words'") == ("id", "quoted words")
+    # An empty quoted title clears the title.
+    assert parse_rename_args('id ""') == ("id", "")
     # Missing title -> None (caller prints usage).
     assert parse_rename_args("only-id") is None
     assert parse_rename_args("") is None
-    # Malformed quoting -> None rather than raising.
-    assert parse_rename_args('id "unterminated') is None
-    print("parse_rename_args handles quotes and incomplete input: OK")
+    print("parse_rename_args handles unquoted multi-word titles and quotes: OK")
+
+
+def test_resolve_session_ref():
+    sessions = [{"id": "a/1"}, {"id": "b/2"}, {"id": "c/3"}]
+    # 1-based index resolves to the id.
+    assert resolve_session_ref("2", sessions) == ("b/2", None)
+    # A raw (non-numeric) id passes through unchanged.
+    assert resolve_session_ref("x/9", sessions) == ("x/9", None)
+    # Out-of-range index reports an error.
+    sid, err = resolve_session_ref("9", sessions)
+    assert sid is None and "No session #9" in err, (sid, err)
+    print("resolve_session_ref maps indices and passes ids through: OK")
 
 
 def test_complete_slash_rename():
@@ -598,5 +615,6 @@ if __name__ == "__main__":
     test_rename_session_sets_and_clears()
     test_rename_missing_session_returns_false()
     test_parse_rename_args()
+    test_resolve_session_ref()
     test_complete_slash_rename()
     print("\nALL session-store tests passed.")

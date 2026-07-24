@@ -250,20 +250,42 @@ def rename_session(
 
 
 def parse_rename_args(text: str) -> tuple[str, str] | None:
-    """Parse ``<session_id> "New title"`` (quote-aware) into ``(id, title)``.
+    """Parse ``<session_id_or_index> <title>`` into ``(ref, title)``.
 
-    Returns ``None`` when fewer than two tokens are present or the quoting is
-    malformed, so callers can print a usage hint.
+    The title is everything after the first whitespace-separated token, so it may
+    contain spaces without quoting (e.g. ``150 TCP timeout issue``). A single
+    pair of surrounding quotes is stripped if present (``id "New title"``), and
+    an empty quoted title (``id ""``) clears the title. Returns ``None`` when no
+    title is given, so callers can print a usage hint.
     """
-    import shlex
-
-    try:
-        parts = shlex.split(text)
-    except ValueError:
+    text = text.strip()
+    if not text:
         return None
+    parts = text.split(None, 1)
     if len(parts) < 2:
         return None
-    return parts[0], parts[1]
+    ref, title = parts[0], parts[1].strip()
+    if len(title) >= 2 and title[0] == title[-1] and title[0] in ("'", '"'):
+        title = title[1:-1]
+    return ref, title
+
+
+def resolve_session_ref(
+    ref: str, session_list: list[dict[str, Any]]
+) -> tuple[str | None, str | None]:
+    """Resolve a 1-based list index or a raw id to a session id.
+
+    ``session_list`` is the most recent :func:`list_sessions` result. Returns
+    ``(session_id, None)`` on success or ``(None, error_message)`` when a numeric
+    index is out of range. A non-numeric ``ref`` is treated as a session id and
+    returned unchanged.
+    """
+    if ref.isdigit():
+        idx = int(ref)
+        if not (1 <= idx <= len(session_list)):
+            return None, f"No session #{idx}. Run /sessions list first."
+        return session_list[idx - 1]["id"], None
+    return ref, None
 
 
 def load_session(

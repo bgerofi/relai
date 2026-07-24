@@ -238,6 +238,44 @@ def test_sessions_list_shows_title_over_backend():
     print("/sessions list shows the title instead of the preview: OK")
 
 
+def test_sessions_rename_by_index_and_unquoted_title():
+    from ludvart.session import load_session
+
+    with _tmp_sessions():
+        saved = SessionStore.create_new()
+        saved.save(
+            [("you", "find me")],
+            [{"role": "user", "content": "find me"}],
+            provider="custom",
+        )
+        current = SessionStore.create_new()
+        # list populates the backend index, then rename by 1-based index with a
+        # multi-word, unquoted title (the case the user hit).
+        client_ch, backend_ch = _pipe_pair()
+        t = threading.Thread(
+            target=lambda: serve(
+                backend_ch, llm=_FakeBackendLLM(), session=current
+            ),
+            daemon=True,
+        )
+        t.start()
+        client = BackendClient(client_ch)
+        host = RecordingHost()
+        assert client_ch.recv()["type"] == "hello"
+        client.command("sessions list", host)
+        client.command("sessions rename 1 PythonSV-CDO TCP timeout issue", host)
+        client_ch.close()
+        t.join(timeout=2)
+        backend_ch.close()
+
+        assert (
+            load_session(saved.session_id)["title"]
+            == "PythonSV-CDO TCP timeout issue"
+        )
+        assert any("Renamed" in s for s in host.systems), host.systems
+    print("/sessions rename <n> with an unquoted multi-word title: OK")
+
+
 def main():
     test_agent_core_persists_to_backend_session()
     test_sessions_list_over_backend()
@@ -245,6 +283,7 @@ def main():
     test_sessions_load_over_backend()
     test_sessions_load_by_index_over_backend()
     test_sessions_rename_over_backend()
+    test_sessions_rename_by_index_and_unquoted_title()
     test_sessions_list_shows_title_over_backend()
     print("\nALL backend session tests passed.")
 

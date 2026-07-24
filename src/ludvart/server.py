@@ -264,6 +264,7 @@ def _handle_sessions(args, core, channel: FrameChannel, emit) -> None:
         list_sessions,
         parse_rename_args,
         rename_session,
+        resolve_session_ref,
     )
 
     sub = args[0] if args else "list"
@@ -293,9 +294,13 @@ def _handle_sessions(args, core, channel: FrameChannel, emit) -> None:
     elif sub == "rename":
         parsed = parse_rename_args(" ".join(args[1:]))
         if parsed is None:
-            emit('Usage: /sessions rename <id> "New title"')
+            emit('Usage: /sessions rename <id> New title')
             return
-        session_id, title = parsed
+        ref, title = parsed
+        session_id, error = resolve_session_ref(ref, core.session_list)
+        if error is not None:
+            emit(error)
+            return
         if not rename_session(session_id, title):
             emit(f"Could not rename session: {session_id}")
             return

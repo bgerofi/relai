@@ -50,6 +50,7 @@ from .session import (
     parse_rename_args,
     provider_family,
     rename_session,
+    resolve_session_ref,
     working_history,
 )
 from .llm import ToolSpec
@@ -1681,10 +1682,18 @@ class Ludvart:
         else:
             panel.add_system(f"Unknown subcommand: /sessions {sub}")
 
-    def _rename_session(self, session_id: str, title: str) -> None:
-        """Set a saved session's display title (and the live store if current)."""
+    def _rename_session(self, ref: str, title: str) -> None:
+        """Set a saved session's display title (and the live store if current).
+
+        ``ref`` may be a 1-based index from the last ``/sessions list`` or a raw
+        session id.
+        """
         panel = self._panel
         if panel is None:
+            return
+        session_id, error = resolve_session_ref(ref, self._session_list)
+        if error is not None:
+            panel.add_system(error)
             return
         if not rename_session(session_id, title):
             panel.add_system(f"Could not rename session: {session_id}")
